@@ -1,0 +1,10 @@
+{
+  "name": "Révision CEB",
+  "short_name": "CEB",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbf8f2",
+  "theme_color": "#3f5bd8",
+  "lang": "fr",
+  "icons": [{"src": "/img/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+}

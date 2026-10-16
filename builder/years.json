@@ -1,0 +1,54 @@
+{
+  "_doc": "Plages de pages (numérotation PDF, 1 = première page) des sections de correction par livret, pages du texte lu pour 'Écouter', durées officielles (minutes) relevées dans les consignes de passation. Une année absente d'ici est traitée en détection automatique (questions + livrets), sans correction ciblée.",
+  "2021": {
+    "label": "CEB 2021",
+    "note": "Le questionnaire fourni est la version adaptée « Arial 14 » ; sa couverture porte la mention CEB2020.",
+    "ecouter_text_pages": [6, 7],
+    "minutes": {"ecouter": 30, "ecrire": 60, "solides": 60, "lire-info": 75, "histgeo": 75, "grandeurs": 75, "lire-fict": 75, "nombres": 75, "sciences": 75},
+    "correction": {
+      "ecouter": [[15, 17]], "ecrire": [[18, 22]], "solides": [[23, 31]], "lire-info": [[32, 36]],
+      "histgeo": [[37, 44]], "grandeurs": [[45, 50], [56, 56]], "lire-fict": [[51, 55]],
+      "nombres": [[57, 62]], "sciences": [[63, 73]]
+    }
+  },
+  "2022": {
+    "label": "CEB 2022",
+    "ecouter_text_pages": [15, 17],
+    "minutes": {"ecouter": 40, "ecrire": 65, "solides": 65, "lire-info": 65, "histgeo": 75, "grandeurs": 75, "lire-fict": 65, "nombres": 75, "sciences": 75},
+    "correction": {
+      "ecouter": [[12, 14]], "ecrire": [[18, 21]], "solides": [[22, 26]], "lire-info": [[27, 30]],
+      "histgeo": [[31, 39]], "grandeurs": [[40, 46]], "lire-fict": [[47, 51]],
+      "nombres": [[52, 59]], "sciences": [[60, 67]]
+    }
+  },
+  "2023": {
+    "label": "CEB 2023",
+    "ecouter_text_pages": [12, 15],
+    "minutes": {"ecouter": 40, "ecrire": 65, "solides": 65, "lire-info": 65, "histgeo": 75, "grandeurs": 75, "lire-fict": 65, "nombres": 75, "sciences": 75},
+    "correction": {
+      "ecouter": [[16, 18]], "ecrire": [[19, 22]], "solides": [[23, 27]], "lire-info": [[28, 32]],
+      "histgeo": [[33, 41]], "grandeurs": [[42, 50]], "lire-fict": [[51, 58]],
+      "nombres": [[59, 66]], "sciences": [[67, 73]]
+    }
+  },
+  "2024": {
+    "label": "CEB 2024",
+    "ecouter_text_pages": [11, 13],
+    "minutes": {"ecouter": 40, "ecrire": 65, "solides": 65, "grandeurs": 75, "histgeo": 75, "nombres1": 40, "nombres2": 50, "lire-info": 65, "lire-fict": 65, "sciences": 75},
+    "correction": {
+      "ecouter": [[14, 18]], "ecrire": [[19, 22]], "solides": [[23, 29]], "grandeurs": [[30, 40]],
+      "histgeo": [[41, 47]], "nombres1": [[48, 51]], "nombres2": [[52, 57]], "lire-info": [[58, 63]],
+      "lire-fict": [[64, 68]], "sciences": [[69, 77]]
+    }
+  },
+  "2025": {
+    "label": "CEB 2025",
+    "ecouter_text_pages": [14, 16],
+    "minutes": {"ecouter": 40, "ecrire": 65, "solides": 65, "grandeurs": 75, "histgeo": 75, "nombres1": 40, "nombres2": 50, "lire-info": 65, "lire-fict": 65, "sciences": 75},
+    "correction": {
+      "ecouter": [[17, 19]], "ecrire": [[20, 23]], "solides": [[24, 32]], "grandeurs": [[33, 41]],
+      "histgeo": [[42, 48]], "nombres1": [[49, 52]], "nombres2": [[53, 59]], "lire-info": [[60, 65]],
+      "lire-fict": [[66, 71]], "sciences": [[72, 81]]
+    }
+  }
+}

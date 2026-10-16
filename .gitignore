@@ -1,0 +1,6 @@
+# Les épreuves officielles ne sont pas versionnées : à déposer localement dans pdf/
+pdf/*.pdf
+data/
+__pycache__/
+*.pyc
+.DS_Store
