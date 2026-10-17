@@ -284,3 +284,25 @@ pre.log { white-space: pre-wrap; font-size: .78rem; background: var(--paper-2); 
 .row.nowrap { flex-wrap: nowrap; }
 @media (max-width: 560px) { .lbl { display: none; } }
 .g2, .g3 { align-items: start; }
+
+/* ---------- réponses interactives */
+.ia { position: absolute; inset: 0; container-type: inline-size; touch-action: manipulation; }
+.ia[data-tool="pen"] { touch-action: none; cursor: crosshair; }
+.ia[data-tool="x"] { cursor: cell; }
+.ia[data-tool="text"] { cursor: text; }
+.ia-draw { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ia-box { position: absolute; padding: 0; margin: 0; min-height: 0; border: 2px solid rgba(63, 91, 216, .35); border-radius: 4px;
+  background: rgba(63, 91, 216, .07); color: #2547d0; font-weight: 900; font-size: 2.4cqw; line-height: 1; display: grid; place-items: center; cursor: pointer; }
+.ia-box:hover { border-color: #3f5bd8; background: rgba(63, 91, 216, .14); }
+.ia-box.on { background: rgba(63, 91, 216, .12); border-color: #2547d0; }
+.ia-box.good { border: 3px solid #2f9e5b; background: rgba(47, 158, 91, .18); color: #1d7a43; }
+.ia-box.missed { border: 3px dashed #2f9e5b; background: rgba(47, 158, 91, .08); }
+.ia-box.bad { border: 3px solid #d9483b; background: rgba(217, 72, 59, .14); color: #d9483b; }
+.ia input.ia-field, .ia input.ia-text { position: absolute; min-height: 0; margin: 0; border: 0; border-radius: 3px 3px 0 0; padding: 0 .35em;
+  font-family: "Chalkboard SE", "Comic Sans MS", "Segoe Print", var(--font); font-size: 2.1cqw; color: #2547d0; line-height: 1.1; }
+.ia input.ia-field { border-bottom: 2px solid rgba(63, 91, 216, .45); background: rgba(63, 91, 216, .06); }
+.ia input.ia-field:focus, .ia input.ia-text:focus { outline: 2px solid rgba(63, 91, 216, .5); outline-offset: 0; background: rgba(255, 255, 255, .9); }
+.ia input.ia-text { background: rgba(255, 246, 200, .85); width: 28cqw; height: 3.4cqw; transform: translateY(-15%); }
+.ia-mark { position: absolute; transform: translate(-50%, -50%); font-size: 3.2cqw; font-weight: 900; color: #2547d0; line-height: 1; cursor: pointer; user-select: none; }
+.ia-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.segia { cursor: default; }

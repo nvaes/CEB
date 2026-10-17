@@ -3,8 +3,8 @@ from pdfwords import norm
 
 # id, libellé, discipline, mots-clés (normalisés, testés dans l'ordre)
 SUBJECTS = [
-    ("nombres2", "Nombres et opérations 2", "math", ["nombres et operations 2"]),
-    ("nombres1", "Nombres et opérations 1", "math", ["nombres et operations 1"]),
+    ("nombres2", "Nombres et opérations 2", "math", ["nombres et operations 2", "nombres 2 "]),
+    ("nombres1", "Nombres et opérations 1", "math", ["nombres et operations 1", "nombres 1 "]),
     ("nombres", "Nombres et opérations", "math", ["nombres et operation", "nombres"]),
     ("grandeurs", "Grandeurs", "math", ["grandeurs"]),
     ("solides", "Solides et figures", "math", ["solides"]),

@@ -24,6 +24,8 @@ import time
 
 from PIL import Image
 
+import answers
+import autodetect
 import pdfwords
 import subjects
 from pdfwords import norm
@@ -31,7 +33,7 @@ from pdfwords import norm
 HERE = os.path.dirname(os.path.abspath(__file__))
 DPI = int(os.environ.get("CEB_DPI", "125"))
 JPEG_Q = int(os.environ.get("CEB_JPEG_QUALITY", "72"))
-BUILD_VERSION = 11  # incrémenter pour forcer une reconstruction après changement d'algorithme
+BUILD_VERSION = 12  # incrémenter pour forcer une reconstruction après changement d'algorithme
 
 TOP_MARGIN = 0.035   # fraction de hauteur ignorée en haut de page (continuations)
 BOTTOM_CUT = 0.935   # au-delà : pied de page (numéro, sous-total)
@@ -42,16 +44,22 @@ def log(*a):
 
 
 # ---------------------------------------------------------------- fichiers
-def find_years(pdf_dir):
+def find_years(pdf_dirs):
+    """Recherche les PDF dans un ou plusieurs dossiers (séparés par os.pathsep).
+    En cas de doublon, le dernier dossier (téléversements) l'emporte."""
     years = {}
-    for f in sorted(os.listdir(pdf_dir)):
-        m = re.match(r"(\d{4})_CEB_([A-Za-z]+)_?\.pdf$", f, re.I)
-        if not m:
+    for pdf_dir in [d for d in str(pdf_dirs).split(os.pathsep) if d]:
+        if not os.path.isdir(pdf_dir):
             continue
-        kind = m.group(2).lower()
-        key = {"questionnaire": "q", "correction": "c", "portfolio": "p"}.get(kind)
-        if key:
-            years.setdefault(m.group(1), {})[key] = os.path.join(pdf_dir, f)
+        for f in sorted(os.listdir(pdf_dir)):
+            m = re.match(r"(\d{4})_CEB_([A-Za-z]+)_?\.pdf$", f, re.I)
+            if not m:
+                continue
+            kind = m.group(2).lower()
+            key = {"questionnaire": "q", "questionnaires": "q", "correction": "c", "corrections": "c",
+                   "correctif": "c", "portfolio": "p"}.get(kind)
+            if key:
+                years.setdefault(m.group(1), {})[key] = os.path.join(pdf_dir, f)
     return {y: v for y, v in years.items() if "q" in v}
 
 
@@ -396,7 +404,13 @@ def build_year(year, files, cfg, out, workers):
     # correction
     if "c" in files:
         cpages = loaded["c"]
-        sections = cfg.get("correction", {})
+        sections = cfg.get("correction") or {}
+        if not sections:
+            sections, how = autodetect.correction_sections(cpages, livrets)
+            info["auto"] = True
+            log(f"{year}: sections de correction détectées automatiquement ({how}) : "
+                + ", ".join(f"{k} p.{v[0][0]}-{v[-1][1]}" for k, v in sections.items()))
+        info["sections"] = sections
         rules_cache = {}
 
         def rules_of(pno):
@@ -419,8 +433,24 @@ def build_year(year, files, cfg, out, workers):
                     q["corr"] = [{"p": p, "y0": 0, "y1": 1} for p in plist]
                 else:
                     q["corr"] = corr.get(q["n"], [])
-        if cfg.get("ecouter_text_pages"):
-            info["ecouter_text"] = ecouter_text(files["c"], cfg["ecouter_text_pages"])
+        etp = cfg.get("ecouter_text_pages") or autodetect.ecouter_pages(cpages, sections)
+        if etp:
+            info["ecouter_text"] = ecouter_text(files["c"], etp)
+    # réponses interactives : cases, zones de saisie, clé de correction des cases
+    if os.environ.get("CEB_INTERACTIVE", "1") != "0":
+        cp = loaded.get("c")
+        todo = [q for lv in livrets for q in lv["questions"] if not q.get("whole")]
+
+        def ia(q):
+            try:
+                q["ia"] = answers.extract(qpages, cp, q, ydir)
+            except Exception as e:  # pragma: no cover
+                log(f"{year} Q{q['n']}: extraction interactive impossible ({e!r})")
+        with cf.ThreadPoolExecutor(max(1, workers)) as ex:
+            list(ex.map(ia, todo))
+        nk = sum(1 for q in todo if q.get("ia", {}).get("key"))
+        no = sum(1 for q in todo if q.get("ia", {}).get("opts"))
+        log(f"{year}: {no} questions à cases, {nk} avec clé de correction automatique")
     for lv in livrets:
         sid = lv["subject"]
         s = subjects.SUBJECT_BY_ID.get(sid)
@@ -449,7 +479,8 @@ def main():
     ap.add_argument("--pdf", default=os.environ.get("CEB_PDF_DIR", "/pdf"))
     ap.add_argument("--out", default=os.environ.get("CEB_DATA_DIR", "/data"))
     ap.add_argument("--config", default=os.path.join(HERE, "years.json"))
-    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--force", action="store_true", help="ignore l'empreinte globale (le cache par année reste utilisé)")
+    ap.add_argument("--no-cache", action="store_true", help="réanalyse toutes les années")
     ap.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 2)))
     a = ap.parse_args()
 
@@ -457,7 +488,10 @@ def main():
     if not years:
         log(f"Aucun PDF trouvé dans {a.pdf} (attendu : AAAA_CEB_questionnaire.pdf, …)")
         return 2
-    allfiles = [f for v in years.values() for f in v.values()] + [a.config, os.path.abspath(__file__)]
+    local_cfg = os.path.join(a.out, "years.local.json")
+    allfiles = [f for v in years.values() for f in v.values()] + [a.config] \
+        + [os.path.join(HERE, f) for f in os.listdir(HERE) if f.endswith(".py")] \
+        + ([local_cfg] if os.path.exists(local_cfg) else [])
     fp = fingerprint(allfiles)
     os.makedirs(a.out, exist_ok=True)
     cat_path = os.path.join(a.out, "catalog.json")
@@ -473,9 +507,34 @@ def main():
                "disciplines": subjects.DISCIPLINES,
                "subjects": {s[0]: {"label": s[1], "discipline": s[2]} for s in subjects.SUBJECTS},
                "years": []}
-    for y in sorted(years):
+    local = os.path.join(a.out, "years.local.json")
+    if os.path.exists(local):
         try:
-            catalog["years"].append(build_year(y, years[y], cfg.get(y, {}), a.out, a.workers))
+            for k, v in json.load(open(local)).items():
+                cfg[k] = {**cfg.get(k, {}), **v}
+        except Exception as e:
+            log(f"years.local.json ignoré : {e!r}")
+    cache_dir = os.path.join(a.out, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    code_fp = fingerprint([os.path.join(HERE, f) for f in os.listdir(HERE) if f.endswith(".py")])
+    for y in sorted(years):
+        yfp = hashlib.sha1((fingerprint(list(years[y].values())) + code_fp
+                            + json.dumps(cfg.get(y, {}), sort_keys=True)).encode()).hexdigest()[:16]
+        cpath = os.path.join(cache_dir, f"{y}.json")
+        try:
+            if not a.no_cache and os.path.exists(cpath):
+                c = json.load(open(cpath))
+                if c.get("_fp") == yfp:
+                    catalog["years"].append(c["year"])
+                    log(f"{y}: inchangé (cache)")
+                    continue
+        except Exception:
+            pass
+        try:
+            info = build_year(y, years[y], cfg.get(y, {}), a.out, a.workers)
+            catalog["years"].append(info)
+            with open(cpath, "w") as f:
+                json.dump({"_fp": yfp, "year": info}, f, ensure_ascii=False, separators=(",", ":"))
         except Exception as e:  # une année défaillante ne bloque pas les autres
             log(f"ERREUR {y}: {e!r}")
             import traceback

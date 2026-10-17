@@ -121,9 +121,17 @@
     const p = S.profiles.find((x) => x.id === id);
     if (!p) return;
     S.profile = p; store.set("profile", id);
-    S.state = await api(`profiles/${id}/state`); derive(); paintWho();
+    S.state = await api(`profiles/${id}/state`); S.ans = S.state.answers || {}; derive(); paintWho();
   }
-  async function refreshState() { if (S.profile) { S.state = await api(`profiles/${S.profile.id}/state`); derive(); } }
+  async function refreshState() { if (S.profile) { S.state = await api(`profiles/${S.profile.id}/state`); S.ans = S.state.answers || {}; derive(); } }
+  const saveTimers = {};
+  function saveAnswer(qid) {
+    clearTimeout(saveTimers[qid]);
+    saveTimers[qid] = setTimeout(() => {
+      if (!S.profile) return;
+      api(`profiles/${S.profile.id}/answers`, { method: "PUT", body: { qid, data: S.ans[qid] || {} } }).catch(() => toast("Réponse non enregistrée (serveur injoignable)"));
+    }, 700);
+  }
   function paintWho() {
     const w = $("#who");
     w.innerHTML = S.profile ? `<span class="avatar" style="background:${esc(S.profile.color)}33">${esc(S.profile.avatar)}</span><span class="name">${esc(S.profile.name)}</span>`
@@ -156,8 +164,13 @@
       <img loading="lazy" alt="" src="${pageUrl(year, kind, s.p)}" style="top:${(-(s.y0 / h) * 100).toFixed(3)}%"></div>`;
   }
   const fullPage = (year, kind, p) => segHTML(year, kind, { p, y0: 0, y1: 1 });
+  function segIA(year, s, ctx) {
+    const h = Math.max(0.02, s.y1 - s.y0), r = pageRatio(year, "q", s.p);
+    return `<div class="seg segia" style="aspect-ratio:1/${(r * h).toFixed(4)}">
+      <img loading="lazy" alt="" src="${pageUrl(year, "q", s.p)}" style="top:${(-(s.y0 / h) * 100).toFixed(3)}%">${IA.layer(s, ctx)}</div>`;
+  }
   function bindZoom(root = document) {
-    $$(".seg", root).forEach((el) => el.addEventListener("click", () => openLightbox([el.dataset.zoom], 0)));
+    $$(".seg[data-zoom]", root).forEach((el) => el.addEventListener("click", () => openLightbox([el.dataset.zoom], 0)));
   }
   function openLightbox(urls, idx) {
     const lb = document.createElement("div");
@@ -414,6 +427,15 @@
       ? q.corr.map((sg) => segHTML(year, "c", sg)).join("")
       : (lv.cpages ? `<div class="notice" style="margin:10px">Correction ciblée indisponible pour cette question : voici les pages de correction du livret.</div>${lv.cpages.map((p) => fullPage(year, "c", p)).join("")}` : `<div class="notice">Pas de correction disponible.</div>`);
     const prevA = S.last[q.qid];
+    const answers = s.mode === "exam" ? (s.answers = s.answers || {}) : (S.ans = S.ans || {});
+    const ctx = { questions: [q], answers, reveal: revealed ? { [q.qid]: true } : {}, readonly: s.mode === "exam" };
+    const ev = IA.evaluate(q, answers[q.qid]);
+    if (revealed && cur === undefined && ev.full && (s.mode === "exam" || IA.hasContent(answers[q.qid]))) {
+      s.scores[q.qid] = ev.pts; s.autoScored = { ...(s.autoScored || {}), [q.qid]: true };
+      if (s.mode !== "exam") { saveAttempt(q, ev.pts, s.mode, now() - s.qt); s.lastSaved = { ...(s.lastSaved || {}), [q.qid]: ev.pts }; }
+      return viewSession();
+    }
+    const hasIA = q.ia && ((q.ia.opts || []).length || (q.ia.fields || []).length);
     render(`
       <div class="spread no-print"><a href="${s.back || "#/"}" class="small">← Quitter</a><span class="small muted">${esc(s.title || "")}</span></div>
       <div class="dots no-print" style="margin:10px 0 14px">${s.items.map((id, k) => `<button class="dot ${s.scores[id] !== undefined ? (s.scores[id] >= qmax(S.Q[id]) ? "ok" : s.scores[id] > 0 ? "mid" : "ko") : ""} ${k === s.i ? "cur" : ""}" data-jump="${k}">${k + 1}</button>`).join("")}</div>
@@ -431,8 +453,9 @@
       ${lv.subject === "ecouter" ? `<details class="no-print" ${s.i === 0 ? "open" : ""} style="margin-bottom:14px"><summary class="small"><b>🎧 Texte à écouter</b></summary><div style="margin-top:8px">${ttsHTML(year, true)}</div></details>` : ""}
       <div class="qwrap ${pfOpen ? "with-pf" : ""}">
         <div>
-          <div class="sheet" id="qsheet">${q.segs.map((sg) => segHTML(year, "q", sg)).join("")}</div>
-          <p class="tiny no-print" style="margin-top:6px">Touchez l'image pour l'agrandir. Réponds sur une feuille ou oralement, puis vérifie avec la correction.</p>
+          <div class="spread no-print" style="margin-bottom:8px">${IA.toolbarHTML()}<div class="row"><button class="btn sm" data-a="zoom" title="Agrandir la page">🔍</button><button class="btn sm ghost" data-a="clear" title="Effacer mes réponses">↺<span class="lbl"> Effacer</span></button></div></div>
+          <div class="sheet" id="qsheet">${q.segs.map((sg) => segIA(year, sg, ctx)).join("")}</div>
+          <p class="tiny no-print" style="margin-top:6px">${hasIA ? "Réponds directement sur la page : touche les cases, écris sur les lignes. Pour un tableau ou un tracé, utilise ✗, Aa ou ✏️." : "Réponds sur la page avec les outils ✗, Aa et ✏️, ou sur une feuille."} Puis vérifie avec la correction.</p>
           <div class="corr-box ${revealed ? "" : "hidden"}" id="corr">
             <div class="label">✅ Correction</div>
             <div class="sheet">${corrHTML}</div>
@@ -440,6 +463,7 @@
           </div>
           <div class="card score-box ${revealed ? "" : "hidden"} no-print" id="score">
             <div class="spread"><h3 style="margin:0">Combien de points as-tu obtenus ?</h3><span class="tiny">Compare ta réponse à la correction, honnêtement 😉</span></div>
+            ${ev.max ? `<div class="notice ${ev.full ? "info" : ""}" style="margin-top:8px">🤖 Cases corrigées automatiquement : <b>${fmtN(ev.pts)} / ${ev.max}</b>${ev.full ? (s.autoScored?.[q.qid] ? " — score enregistré, tu peux le modifier." : "") : ` — évalue toi-même le reste de la question (${fmtN(qmax(q) - ev.max)} pt${qmax(q) - ev.max > 1 ? "s" : ""}).`}</div>` : ""}
             <div style="margin-top:10px">${scoreControls(q, cur)}</div>
           </div>
           <div class="sticky-foot no-print"><div class="row nowrap">
@@ -453,6 +477,8 @@
           <div class="sheet" id="pfview">${fullPage(year, "p", pf[0])}</div></aside>` : ""}
       </div>`, true);
     bindZoom(app()); bindTTS(app());
+    IA.bindToolbar(app());
+    IA.bind($("#qsheet"), ctx, (qid) => { if (s.mode !== "exam") saveAnswer(qid); });
     S.sessionActive = true;
     const inp = $("#scoreInput");
     $$("[data-step]").forEach((b) => b.addEventListener("click", () => { const v = Math.min(qmax(q), Math.max(0, (+inp.value || 0) + +b.dataset.step)); inp.value = v; }));
@@ -489,6 +515,12 @@
     if (a === "pf") { store.set("pfOpen", !store.get("pfOpen", window.innerWidth > 1000)); viewSession(); }
     if (a === "flag") { const on = await toggleFlag(q.qid); toast(on ? "Ajoutée à « À revoir »" : "Retirée de « À revoir »"); viewSession(); }
     if (a === "print") window.print();
+    if (a === "zoom") openLightbox([...new Set(q.segs.map((sg) => sg.p))].map((p) => pageUrl(q.year, "q", p)), 0);
+    if (a === "clear") {
+      const tgt = s.mode === "exam" ? s.answers : S.ans;
+      if (IA.hasContent(tgt[q.qid]) && !confirm("Effacer tes réponses à cette question ?")) return;
+      tgt[q.qid] = IA.empty(); if (s.mode !== "exam") saveAnswer(q.qid); viewSession();
+    }
     if (a === "annex") openLightbox(q.livret.annexes.map((p) => pageUrl(q.year, "c", p)), 0);
   }
   function viewSessionEnd() {
@@ -586,37 +618,49 @@
     const y = yearOf(year);
     const total = lv.minutes * 60;
     const pages = range(lv.qpages[0] + 1, lv.qpages[1]).filter((p) => lv.questions.some((q) => q.segs.some((s) => s.p === p)));
+    const draftKey = `examDraft-${S.profile.id}-${year}-${lv.n}`;
+    const draft = store.get(draftKey, null);
+    const examAns = (draft && draft.answers) || {};
+    const ctx = { questions: lv.questions, answers: examAns, reveal: {} };
+    const nAuto = lv.questions.filter((q) => q.ia && q.ia.key).length;
     render(`<a href="#/examen" class="small">← Examen blanc</a>
       <h1>${SUBJECT_ICON[lv.subject] || ""} ${esc(y.label)} — Livret ${lv.n} : ${esc(lv.label)}</h1>
       <div class="card stack" id="intro" style="max-width:760px">
         <p>Durée : <b>${lv.minutes} minutes</b> · ${lv.total || lv.max} points. ${y.pages.p && lv.questions.some((q) => q.portfolio.length) ? "Le portfolio est disponible (bouton en haut)." : ""}</p>
         <ul class="small muted"><li>Prépare une feuille, un crayon${lv.discipline === "math" ? ", une latte, une équerre et un compas" : ""}.</li>
         <li>Le dictionnaire est autorisé${lv.subject === "nombres1" ? " ; la calculatrice est interdite pour ce livret" : lv.discipline === "math" ? " ; la calculatrice est autorisée (sauf indication contraire)" : ""}.</li>
-        <li>Pas de correction pendant l'épreuve. À la fin, on corrige question par question.</li></ul>
-        <div><button class="btn primary big" id="start">▶ Commencer l'épreuve</button></div></div>
+        <li><b>Réponds directement à l'écran</b> : touche les cases pour les cocher, écris sur les lignes ; pour un tableau, un schéma ou un tracé, utilise ✗ (croix), Aa (texte) ou ✏️ (crayon). Tu peux aussi répondre sur papier.</li>
+        <li>Pas de correction pendant l'épreuve. À la fin, ${nAuto ? `les cases de ${nAuto} question${nAuto > 1 ? "s" : ""} sont corrigées automatiquement, ` : ""}le reste se corrige question par question avec la correction officielle.</li></ul>
+        <div class="row"><button class="btn primary big" id="start">▶ ${draft ? "Reprendre l'épreuve" : "Commencer l'épreuve"}</button>${draft ? `<button class="btn" id="restart">Recommencer à zéro</button>` : ""}</div></div>
       <div id="run" class="hidden">
         <div class="card" style="position:sticky;top:64px;z-index:20;padding:10px 14px;margin-bottom:12px">
           <div class="spread"><span class="timer" id="timer">${mmss(total)}</span>
           <div class="row">${y.pages.p ? `<button class="btn sm" id="pfbtn">🖼️ Portfolio</button>` : ""}<button class="btn sm" id="pause">⏸ Pause</button><button class="btn sm primary" id="end">Terminer et corriger</button></div></div>
-          <div class="timebar" style="margin-top:8px"><i id="tbar" style="width:100%"></i></div></div>
+          <div class="timebar" style="margin-top:8px"><i id="tbar" style="width:100%"></i></div>
+          <div style="margin-top:8px">${IA.toolbarHTML()}</div></div>
         ${lv.subject === "ecouter" ? ttsHTML(year) : ""}
-        <div class="stack exam-pages" style="margin-top:12px">${pages.map((p) => `<div class="sheet">${fullPage(year, "q", p)}</div>`).join("")}</div>
+        <div class="stack exam-pages" id="xpages" style="margin-top:12px">${pages.map((p) => `<div class="sheet">${segIA(year, { p, y0: 0, y1: 1 }, ctx)}</div>`).join("")}</div>
         <div style="margin:20px 0"><button class="btn primary big" id="end2">J'ai fini — corriger</button></div>
       </div>`);
-    bindZoom(app()); bindTTS(app());
-    let left = total, paused = false, timer = null, t0 = now();
+    bindTTS(app()); IA.bindToolbar(app());
+    let left = draft && draft.left > 0 ? draft.left : total, paused = false, timer = null, t0 = now();
+    const saveDraft = () => store.set(draftKey, { answers: examAns, left });
+    IA.bind($("#xpages"), ctx, saveDraft);
+    $("#timer").textContent = mmss(left);
     const tick = () => {
       if (paused) return;
-      left -= 1; $("#timer").textContent = mmss(left); $("#tbar").style.width = `${Math.max(0, (100 * left) / total)}%`;
+      left -= 1; if (left % 15 === 0) saveDraft(); $("#timer").textContent = mmss(left); $("#tbar").style.width = `${Math.max(0, (100 * left) / total)}%`;
       $("#timer").classList.toggle("warn", left <= 300);
       if (left === 300) toast("Plus que 5 minutes !");
       if (left <= 0) { clearInterval(timer); toast("Temps écoulé !"); finish(); }
     };
     const finish = () => {
       clearInterval(timer);
-      S.session = { i: 0, scores: {}, revealed: {}, t0, qt: now(), title: `Correction — ${y.label} · ${lv.label}`, items: lv.questions.map((q) => q.qid), mode: "exam", back: "#/examen", exam: { year, n: lv.n, seconds: Math.round(total - left) } };
+      saveDraft();
+      S.session = { i: 0, scores: {}, revealed: {}, t0, qt: now(), title: `Correction — ${y.label} · ${lv.label}`, items: lv.questions.map((q) => q.qid), mode: "exam", back: "#/examen", answers: examAns, draftKey, exam: { year, n: lv.n, seconds: Math.round(total - left) } };
       location.hash = "#/session";
     };
+    $("#restart")?.addEventListener("click", () => { store.set(draftKey, null); viewExamRun(year, n); });
     $("#start").addEventListener("click", () => { $("#intro").classList.add("hidden"); $("#run").classList.remove("hidden"); timer = setInterval(tick, 1000); S.timers.push(timer); });
     $("#pause").addEventListener("click", (e) => { paused = !paused; e.target.textContent = paused ? "▶ Reprendre" : "⏸ Pause"; });
     $("#end").addEventListener("click", finish); $("#end2").addEventListener("click", finish);
@@ -629,7 +673,9 @@
     try {
       await api(`profiles/${S.profile.id}/attempts`, { method: "POST", body: { items: items.filter((q) => s.scores[q.qid] !== undefined).map((q) => ({ qid: q.qid, score: s.scores[q.qid], max: qmax(q), mode: "exam", seconds: 0 })) } });
       const lv = livretOf(ex.year, ex.n);
-      await api(`profiles/${S.profile.id}/exams`, { method: "POST", body: { year: ex.year, livret: ex.n, subject: lv.subject, score: got, max, seconds: ex.seconds, detail: s.scores } });
+      const light = {}; for (const [k, v] of Object.entries(s.answers || {})) light[k] = { b: v.b, f: v.f, m: v.m, t: v.t };
+      await api(`profiles/${S.profile.id}/exams`, { method: "POST", body: { year: ex.year, livret: ex.n, subject: lv.subject, score: got, max, seconds: ex.seconds, detail: { scores: s.scores, auto: s.autoScored || {}, answers: light } } });
+      if (s.draftKey) store.set(s.draftKey, null);
       await refreshState();
     } catch (e) { toast("Enregistrement impossible : " + e.message); }
     s.examSaved = true; viewSessionEnd();
@@ -732,6 +778,112 @@
     $$("[data-train]").forEach((b) => b.addEventListener("click", () => { const p = store.get("trainPrefs", { groups: [], years: [], n: 10, filter: "notdone" }); p.groups = [b.dataset.train]; store.set("trainPrefs", p); location.hash = "#/entrainement"; }));
   }
 
+  /* ================================================================ fichiers CEB (téléversement) */
+  const KIND_LABEL = { questionnaire: "Questionnaire", correction: "Correction", portfolio: "Portfolio" };
+  async function viewFiles() {
+    const st = await api("status"); const settings = await api("settings");
+    const byYear = {};
+    for (const f of st.files) { const m = f.name.match(/^(\d{4})_CEB_([a-z]+)/i); if (!m) continue; (byYear[m[1]] = byYear[m[1]] || []).push({ ...f, kind: m[2].toLowerCase().replace(/s$/, "") }); }
+    const nextYear = String(Math.max(new Date().getFullYear(), ...Object.keys(byYear).map(Number).map((y) => y + 1).filter((y) => y <= new Date().getFullYear() + 1)));
+    const mb = (n) => (n / 1048576).toFixed(1).replace(".", ",") + " Mo";
+    render(`<h1>Fichiers CEB</h1>
+      <p class="muted">Ajoute les épreuves d'une nouvelle année (ou remplace un fichier) : le site les découpe automatiquement en questions, corrections et réponses interactives.</p>
+      <div class="grid g2">
+        <div class="card stack" id="up">
+          <h2>📤 Ajouter une année</h2>
+          <label class="row"><span class="small muted" style="width:110px">Année</span><input type="number" id="upyear" min="2000" max="2099" value="${nextYear}" style="width:120px"></label>
+          ${Object.entries(KIND_LABEL).map(([k, l]) => `<label class="row"><span class="small muted" style="width:110px">${l}</span><input type="file" accept="application/pdf,.pdf" data-kind="${k}" style="flex:1;min-width:0"></label>`).join("")}
+          <p class="tiny" style="margin:0">Les trois PDF officiels sont publiés chaque année par la Fédération Wallonie-Bruxelles. Le portfolio est facultatif mais recommandé. ${settings.pin ? "Le code parent sera demandé." : ""}</p>
+          <div class="bar hidden" id="upbar" style="height:10px"><i class="ok" style="width:0%"></i></div>
+          <div class="small" id="upmsg"></div>
+          <div class="row"><button class="btn primary" id="upgo">Envoyer et analyser</button></div>
+        </div>
+        <div class="card stack">
+          <h2>⚙️ Analyse</h2>
+          <p class="small">${S.years.length} années chargées · ${Object.keys(S.Q).length} questions · ${Object.values(S.Q).filter((q) => q.ia && q.ia.key).length} questions à cases corrigées automatiquement.</p>
+          <div class="row"><button class="btn" id="rebuild">🔄 Relancer l'analyse</button>${st.building ? `<span class="chip">analyse en cours…</span>` : ""}</div>
+          ${st.log.length ? `<pre class="log" id="blog">${esc(st.log.join("\n"))}</pre>` : ""}
+          <p class="tiny" style="margin:0">Une année inchangée est reprise du cache : seule la nouvelle année est analysée (de une à quelques minutes, reconnaissance optique comprise).</p>
+        </div>
+      </div>
+      <div class="section-title"><h2>Fichiers disponibles</h2></div>
+      <div class="card table-wrap"><table><thead><tr><th>Année</th><th>Fichier</th><th>Origine</th><th>Taille</th><th></th></tr></thead><tbody>
+        ${Object.keys(byYear).sort().reverse().map((y) => byYear[y].map((f, i) => `<tr><td>${i === 0 ? `<b>${y}</b>` : ""}</td>
+          <td><a href="/pdf/${encodeURIComponent(f.name)}" target="_blank" rel="noopener">${esc(f.name)}</a></td>
+          <td class="small">${esc(f.origin)}</td><td class="small">${mb(f.size)}</td>
+          <td>${f.origin === "téléversé" ? `<button class="btn sm danger" data-delf="${esc(f.name)}">Supprimer</button>` : ""}</td></tr>`).join("")).join("")}
+      </tbody></table></div>
+      <div class="section-title"><h2>Réglage fin d'une année</h2></div>
+      <div class="card stack">
+        <p class="small muted" style="margin:0">Pour une nouvelle année, les pages de correction de chaque livret sont détectées automatiquement. Si une correction ne tombe pas en face de la bonne question, ajuste ici les plages de pages (numéros de pages du PDF de correction), puis relance l'analyse.</p>
+        <div class="row"><select id="cfgyear">${S.years.map((y) => `<option value="${y.id}">${esc(y.label)}${y.auto ? " (détection auto)" : ""}</option>`).join("")}</select><button class="btn sm" id="cfgload">Afficher</button></div>
+        <textarea id="cfgtext" rows="12" spellcheck="false" style="font-family:ui-monospace,monospace;font-size:.85rem;width:100%" class="hidden"></textarea>
+        <div class="row hidden" id="cfgbtns"><button class="btn primary" id="cfgsave">Enregistrer et relancer l'analyse</button><button class="btn ghost" id="cfgreset">Revenir à la détection automatique</button></div>
+      </div>`);
+    const askPin = async () => (settings.pin ? prompt("Code parent :") || "" : "");
+    const upload = (file, year, kind, pin, onProgress) => new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/upload?year=${encodeURIComponent(year)}&kind=${kind}`);
+      xhr.setRequestHeader("Content-Type", "application/pdf"); xhr.setRequestHeader("X-Pin", pin);
+      xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+      xhr.onload = () => { let d = {}; try { d = JSON.parse(xhr.responseText); } catch (e) { /* */ } xhr.status < 300 ? resolve(d) : reject(new Error(d.error || xhr.statusText)); };
+      xhr.onerror = () => reject(new Error("connexion interrompue"));
+      xhr.send(file);
+    });
+    $("#upgo").addEventListener("click", async () => {
+      const year = $("#upyear").value.trim();
+      const files = $$("#up input[type=file]").filter((i) => i.files[0]).map((i) => ({ kind: i.dataset.kind, file: i.files[0] }));
+      if (!/^20\d\d$/.test(year)) return toast("Année invalide");
+      if (!files.length) return toast("Choisis au moins un fichier PDF");
+      if (!files.some((f) => f.kind === "questionnaire") && !(byYear[year] || []).some((f) => f.kind === "questionnaire")) return toast("Le questionnaire est indispensable");
+      const pin = await askPin();
+      const total = files.reduce((a, f) => a + f.file.size, 0); let done = 0;
+      $("#upbar").classList.remove("hidden"); $("#upgo").disabled = true;
+      try {
+        for (const f of files) {
+          $("#upmsg").textContent = `Envoi : ${KIND_LABEL[f.kind]} (${mb(f.file.size)})…`;
+          await upload(f.file, year, f.kind, pin, (r) => { $("#upbar i").style.width = `${Math.round(((done + r * f.file.size) / total) * 100)}%`; });
+          done += f.file.size;
+        }
+        $("#upmsg").textContent = "Fichiers reçus. Analyse lancée…";
+        await api("rebuild", { method: "POST", body: { pin } });
+        pollBuild();
+      } catch (e) { $("#upmsg").textContent = "Erreur : " + e.message; $("#upgo").disabled = false; }
+    });
+    $("#rebuild").addEventListener("click", async () => { try { await api("rebuild", { method: "POST", body: { pin: await askPin() } }); pollBuild(); } catch (e) { toast(e.message); } });
+    $$("[data-delf]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm(`Supprimer ${b.dataset.delf} ?`)) return;
+      try { await api(`uploads/${encodeURIComponent(b.dataset.delf)}`, { method: "DELETE", body: { pin: await askPin() } }); toast("Fichier supprimé — relance l'analyse pour mettre le site à jour"); viewFiles(); } catch (e) { toast(e.message); }
+    }));
+    $("#cfgload").addEventListener("click", async () => {
+      const y = $("#cfgyear").value; const c = await api(`yearconfig/${y}`); const info = yearOf(y);
+      const cur = Object.keys(c.local).length ? c.local : { ...c.base, correction: c.base.correction || info.sections || {} };
+      $("#cfgtext").value = JSON.stringify(cur, null, 1); $("#cfgtext").classList.remove("hidden"); $("#cfgbtns").classList.remove("hidden");
+    });
+    $("#cfgsave").addEventListener("click", async () => {
+      let cfg; try { cfg = JSON.parse($("#cfgtext").value); } catch (e) { return toast("JSON invalide : " + e.message); }
+      try { const pin = await askPin(); await api(`yearconfig/${$("#cfgyear").value}`, { method: "PUT", body: { pin, config: cfg } }); await api("rebuild", { method: "POST", body: { pin } }); pollBuild(); } catch (e) { toast(e.message); }
+    });
+    $("#cfgreset").addEventListener("click", async () => {
+      try { const pin = await askPin(); await api(`yearconfig/${$("#cfgyear").value}`, { method: "PUT", body: { pin, config: null } }); await api("rebuild", { method: "POST", body: { pin } }); pollBuild(); } catch (e) { toast(e.message); }
+    });
+  }
+  async function pollBuild() {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let st; try { st = await api("status"); } catch (e) { continue; }
+      const box = $("#blog") || (() => { const p = document.createElement("pre"); p.className = "log"; p.id = "blog"; $("#rebuild")?.parentElement.after(p); return p; })();
+      box.textContent = st.log.join("\n"); box.scrollTop = box.scrollHeight;
+      if (!st.building) {
+        if (st.rc === 0) {
+          const res = await fetch("/api/catalog"); if (res.ok) indexCatalog(await res.json());
+          toast("Analyse terminée ✔"); if (location.hash === "#/fichiers") viewFiles();
+        } else toast("L'analyse a rencontré une erreur (voir le journal)");
+        return;
+      }
+    }
+  }
+
   /* ================================================================ espace parent */
   async function viewParent() {
     const st = await api("status"); const settings = await api("settings");
@@ -752,7 +904,7 @@
           <p class="small">${S.years.length} années · ${nq} questions · ${nc} avec correction ciblée (${pct(nc, nq)}%). Construit le ${esc(S.catalog.built)}.</p>
           <p class="small muted">Dossier PDF : <code>${esc(st.pdf_dir)}</code><br>${st.pdfs.length} fichiers : ${st.pdfs.map(esc).join(", ")}</p>
           <p class="small muted">Pour ajouter une année, dépose ses trois PDF (<code>AAAA_CEB_questionnaire.pdf</code>, <code>AAAA_CEB_correction.pdf</code>, <code>AAAA_CEB_portfolio.pdf</code>) dans ce dossier puis reconstruis.</p>
-          <div class="row"><button class="btn" id="rebuild">🔄 Reconstruire le catalogue</button>${st.building ? `<span class="chip">construction en cours…</span>` : ""}</div>
+          <div class="row"><a class="btn primary" href="#/fichiers">📤 Ajouter / gérer les fichiers CEB</a><button class="btn" id="rebuild">🔄 Reconstruire le catalogue</button>${st.building ? `<span class="chip">construction en cours…</span>` : ""}</div>
           ${st.log.length ? `<pre class="log">${esc(st.log.join("\n"))}</pre>` : ""}</div>
         <div class="card stack"><h2>Conseils</h2>
           <ul class="small" style="margin:0;padding-left:18px">
@@ -790,6 +942,7 @@
     const h = location.hash.replace(/^#\/?/, ""); const [r, a, b] = h.split("/");
     $$("#nav a").forEach((x) => x.classList.toggle("active", x.dataset.r === (r || "home") || (r === "livret" && x.dataset.r === "epreuves") || (r === "exercice" && x.dataset.r === "exercices")));
     if (r === "parent") return viewParent();
+    if (r === "fichiers") return viewFiles();
     if (r === "profils") return viewProfiles();
     if (!S.profile) return viewProfiles();
     switch (r || "") {

@@ -27,6 +27,9 @@ PDF_DIR = os.environ.get("CEB_PDF_DIR", os.path.join(ROOT, "pdf"))
 DATA_DIR = os.environ.get("CEB_DATA_DIR", os.path.join(ROOT, "data"))
 PORT = int(os.environ.get("PORT", "8080"))
 DB_PATH = os.path.join(DATA_DIR, "ceb.sqlite")
+UPLOAD_DIR = os.path.join(DATA_DIR, "pdf")
+MAX_UPLOAD = int(os.environ.get("CEB_MAX_UPLOAD_MB", "250")) * 1024 * 1024
+KINDS = {"questionnaire": "questionnaire", "correction": "correction", "portfolio": "portfolio"}
 CATALOG = os.path.join(DATA_DIR, "catalog.json")
 
 mimetypes.add_type("application/javascript", ".js")
@@ -45,7 +48,7 @@ def run_build(force=False):
         BUILD.update(running=True, log=[], started=time.time(), finished=None, rc=None)
 
     def work():
-        cmd = [sys.executable, "-u", BUILDER, "--pdf", PDF_DIR, "--out", DATA_DIR]
+        cmd = [sys.executable, "-u", BUILDER, "--pdf", PDF_DIR + os.pathsep + UPLOAD_DIR, "--out", DATA_DIR]
         if force:
             cmd.append("--force")
         try:
@@ -102,6 +105,8 @@ CREATE TABLE IF NOT EXISTS notes(
   profile INTEGER NOT NULL, qid TEXT NOT NULL, flag INTEGER DEFAULT 0, note TEXT,
   ts REAL, PRIMARY KEY(profile, qid));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS answers(
+  profile INTEGER NOT NULL, qid TEXT NOT NULL, data TEXT, ts REAL, PRIMARY KEY(profile, qid));
 """
 _db_lock = threading.Lock()
 
@@ -114,6 +119,7 @@ def db():
 
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     with db() as con:
         con.executescript(SCHEMA)
 
@@ -137,6 +143,25 @@ def get_setting(key, default=None):
 def set_setting(key, value):
     execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value))
+
+
+def list_pdfs():
+    out = []
+    for origin, d in (("dossier", PDF_DIR), ("téléversé", UPLOAD_DIR)):
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if f.lower().endswith(".pdf"):
+                    st = os.stat(os.path.join(d, f))
+                    out.append({"name": f, "origin": origin, "size": st.st_size, "mtime": st.st_mtime})
+    return out
+
+
+def pdf_path(name):
+    for d in (UPLOAD_DIR, PDF_DIR):
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def pin_hash(pin):
@@ -218,9 +243,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(os.path.join(DATA_DIR, "pages", rel), "public, max-age=604800")
         if p.startswith("/pdf/"):
             name = os.path.basename(p)
-            if not re.fullmatch(r"\d{4}_CEB_\w+\.pdf", name):
+            if not re.fullmatch(r"\d{4}_CEB_\w+\.pdf", name, re.I):
                 return self.error(404, "introuvable")
-            return self.send_file(os.path.join(PDF_DIR, name), "public, max-age=86400")
+            return self.send_file(pdf_path(name) or os.path.join(PDF_DIR, name), "public, max-age=86400")
         if p in ("/", "") or not os.path.splitext(p)[1]:
             return self.send_file(os.path.join(WEB, "index.html"))
         rel = os.path.normpath(p.lstrip("/"))
@@ -238,6 +263,8 @@ class Handler(BaseHTTPRequestHandler):
         self.api("DELETE", urllib.parse.urlparse(self.path).path, {})
 
     def api(self, method, path, qs):
+        if method == "POST" and path.rstrip("/") == "/api/upload":
+            return self.upload(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         try:
             data = self.body() if method in ("POST", "PUT", "DELETE") else {}
         except Exception:
@@ -249,6 +276,44 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self.error(500, str(e))
 
+    def upload(self, qs):
+        """Téléversement brut d'un PDF : POST /api/upload?year=2026&kind=questionnaire (corps = PDF)."""
+        year = (qs.get("year") or [""])[0]
+        kind = KINDS.get((qs.get("kind") or [""])[0])
+        n = int(self.headers.get("Content-Length") or 0)
+        h = get_setting("pin")
+        if h and pin_hash(self.headers.get("X-Pin", "")) != h:
+            self.rfile.read(n)
+            return self.error(403, "code parent incorrect")
+        if not re.fullmatch(r"20\d\d", year) or not kind:
+            self.rfile.read(n)
+            return self.error(400, "année (AAAA) et type (questionnaire, correction, portfolio) requis")
+        if n <= 0 or n > MAX_UPLOAD:
+            self.rfile.read(n)
+            return self.error(413, f"fichier vide ou trop volumineux (max {MAX_UPLOAD // 1048576} Mo)")
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        name = f"{year}_CEB_{kind}.pdf"
+        tmp = os.path.join(UPLOAD_DIR, "." + name + ".part")
+        left, head = n, b""
+        with open(tmp, "wb") as f:
+            while left > 0:
+                chunk = self.rfile.read(min(1 << 20, left))
+                if not chunk:
+                    break
+                if not head:
+                    head = chunk[:5]
+                f.write(chunk)
+                left -= len(chunk)
+        if left or head != b"%PDF-":
+            os.remove(tmp)
+            return self.error(400, "ce fichier n'est pas un PDF valide")
+        # remplace une éventuelle version téléversée précédente (casse différente comprise)
+        for f in os.listdir(UPLOAD_DIR):
+            if f.lower() == name.lower():
+                os.remove(os.path.join(UPLOAD_DIR, f))
+        os.replace(tmp, os.path.join(UPLOAD_DIR, name))
+        return self.send_json({"ok": True, "name": name, "size": n}, 201)
+
     def route(self, method, path, data, qs):
         parts = path.split("/")[2:]  # après /api
         head = parts[0] if parts else ""
@@ -257,8 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             cat = os.path.exists(CATALOG)
             return self.send_json({"ready": cat, "building": BUILD["running"], "log": BUILD["log"][-30:],
                                    "rc": BUILD["rc"], "pdf_dir": PDF_DIR,
-                                   "pdfs": sorted(f for f in os.listdir(PDF_DIR) if f.endswith(".pdf"))
-                                   if os.path.isdir(PDF_DIR) else []})
+                                   "upload_dir": UPLOAD_DIR, "pdfs": [p["name"] for p in list_pdfs()],
+                                   "files": list_pdfs()})
         if head == "catalog" and method == "GET":
             data_, etag = catalog_bytes()
             if data_ is None:
@@ -296,6 +361,35 @@ class Handler(BaseHTTPRequestHandler):
                 if "prefs" in data:
                     set_setting("prefs", json.dumps(data["prefs"]))
                 return self.send_json({"ok": True})
+        if head == "uploads" and method == "DELETE" and len(parts) == 2:
+            if not self.check_pin(data):
+                return self.error(403, "code parent incorrect")
+            name = os.path.basename(parts[1])
+            p = os.path.join(UPLOAD_DIR, name)
+            if not os.path.isfile(p):
+                return self.error(404, "fichier téléversé introuvable")
+            os.remove(p)
+            return self.send_json({"ok": True})
+        if head == "yearconfig" and len(parts) == 2 and re.fullmatch(r"\d{4}", parts[1]):
+            y = parts[1]
+            local_path = os.path.join(DATA_DIR, "years.local.json")
+            local = json.load(open(local_path)) if os.path.exists(local_path) else {}
+            if method == "GET":
+                base = json.load(open(os.path.join(ROOT, "builder", "years.json"))).get(y, {})
+                return self.send_json({"base": base, "local": local.get(y, {})})
+            if method == "PUT":
+                if not self.check_pin(data):
+                    return self.error(403, "code parent incorrect")
+                cfg = data.get("config")
+                if cfg is None:
+                    local.pop(y, None)
+                elif not isinstance(cfg, dict):
+                    return self.error(400, "configuration invalide")
+                else:
+                    local[y] = cfg
+                with open(local_path, "w") as f:
+                    json.dump(local, f, ensure_ascii=False, indent=1)
+                return self.send_json({"ok": True})
         if head == "pin" and method == "POST":
             return self.send_json({"ok": self.check_pin(data)})
 
@@ -322,14 +416,14 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "" and method == "DELETE":
                 if not self.check_pin(data):
                     return self.error(403, "code parent incorrect")
-                for t in ("attempts", "exams", "drills", "notes"):
+                for t in ("attempts", "exams", "drills", "notes", "answers"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
                 execute("DELETE FROM profiles WHERE id=?", (pid,))
                 return self.send_json({"ok": True})
             if sub == "reset" and method == "POST":
                 if not self.check_pin(data):
                     return self.error(403, "code parent incorrect")
-                for t in ("attempts", "exams", "drills", "notes"):
+                for t in ("attempts", "exams", "drills", "notes", "answers"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
                 return self.send_json({"ok": True})
             if sub == "state" and method == "GET":
@@ -338,7 +432,20 @@ class Handler(BaseHTTPRequestHandler):
                     "exams": rows("SELECT id,year,livret,subject,score,max,seconds,detail,ts FROM exams WHERE profile=? ORDER BY ts", (pid,)),
                     "drills": rows("SELECT kind,level,correct,total,seconds,ts FROM drills WHERE profile=? ORDER BY ts", (pid,)),
                     "notes": rows("SELECT qid,flag,note,ts FROM notes WHERE profile=?", (pid,)),
+                    "answers": {r["qid"]: json.loads(r["data"] or "{}") for r in
+                                rows("SELECT qid,data FROM answers WHERE profile=?", (pid,))},
                 })
+            if sub == "answers" and method == "PUT":
+                qid = str(data.get("qid", ""))
+                if not re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", qid):
+                    return self.error(400, "qid invalide")
+                payload = json.dumps(data.get("data") or {}, ensure_ascii=False)
+                if len(payload) > 200_000:
+                    return self.error(413, "réponse trop volumineuse")
+                execute("INSERT INTO answers(profile,qid,data,ts) VALUES(?,?,?,?) "
+                        "ON CONFLICT(profile,qid) DO UPDATE SET data=excluded.data, ts=excluded.ts",
+                        (pid, qid, payload, time.time()))
+                return self.send_json({"ok": True})
             if sub == "attempts" and method == "POST":
                 items = data.get("items") or [data]
                 now = time.time()
@@ -354,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
                 eid = execute("INSERT INTO exams(profile,year,livret,subject,score,max,seconds,detail,ts) VALUES(?,?,?,?,?,?,?,?,?)",
                               (pid, str(data.get("year")), int(data.get("livret") or 0), str(data.get("subject", "")),
                                float(data.get("score", 0)), float(data.get("max", 0)), int(data.get("seconds") or 0),
-                               json.dumps(data.get("detail", {}))[:20000], now))
+                               json.dumps(data.get("detail", {}))[:400000], now))
                 return self.send_json({"ok": True, "id": eid, "ts": now}, 201)
             if sub == "drills" and method == "POST":
                 now = time.time()

@@ -6,7 +6,7 @@ services:
     ports:
       - "8080:8080"           # http://<ip-du-serveur>:8080
     volumes:
-      - ./pdf:/pdf:ro         # déposer ici les PDF officiels du CEB
+      - ./pdf:/pdf:ro         # PDF officiels du CEB (on peut aussi les téléverser depuis le site)
       - ceb-data:/data        # pages découpées + progression des enfants (SQLite)
     environment:
       - TZ=Europe/Brussels
