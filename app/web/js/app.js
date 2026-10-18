@@ -22,11 +22,16 @@
     setTimeout(() => t.remove(), ms);
   }
   async function api(path, opts = {}) {
-    const res = await fetch("/api/" + path, {
-      method: opts.method || "GET", headers: opts.body ? { "Content-Type": "application/json" } : {},
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
+    const headers = opts.body ? { "Content-Type": "application/json" } : {};
+    const tok = store.get("token", null);
+    if (tok && /^profiles\/\d+/.test(path)) headers["X-Profile-Token"] = tok;
+    const res = await fetch("/api/" + path, { method: opts.method || "GET", headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401 && /^profiles\/\d+/.test(path) && !opts.noAuthRedirect) {
+      // session de l'enfant expirée ou code réinitialisé : retour à l'écran des profils
+      store.set("token", null); store.set("profile", null); S.profile = null; paintWho();
+      location.hash = "#/profils"; setTimeout(route, 0);
+    }
     if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
     return data;
   }
@@ -119,7 +124,7 @@
   async function loadProfiles() { S.profiles = await api("profiles"); }
   async function selectProfile(id) {
     const p = S.profiles.find((x) => x.id === id);
-    if (!p) return;
+    if (!p || !store.get("token", null)) return;
     S.profile = p; store.set("profile", id);
     S.state = await api(`profiles/${id}/state`); S.ans = S.state.answers || {}; derive(); paintWho();
   }
@@ -297,10 +302,87 @@
         ${S.profiles.map((p) => `<button class="profile-card" data-id="${p.id}"><span class="avatar big" style="background:${esc(p.color)}33">${esc(p.avatar)}</span>${esc(p.name)}</button>`).join("")}
         <button class="profile-card" data-new="1" style="border-style:dashed"><span class="avatar big">＋</span>Ajouter</button>
       </div>
-      <p class="tiny" style="margin-top:28px"><a href="#/parent">Espace parent</a></p>`);
-    $$("[data-id]").forEach((b) => b.addEventListener("click", async () => { await selectProfile(+b.dataset.id); location.hash = "#/"; route(); }));
+      <p class="tiny" style="margin-top:28px">🔒 Chaque enfant entre son code secret. Code oublié ? Un parent peut le réinitialiser dans l'<a href="#/parent">Espace parent</a>.</p>`);
+    $$("[data-id]").forEach((b) => b.addEventListener("click", () => loginProfile(+b.dataset.id)));
     $("[data-new]").addEventListener("click", () => editProfile());
   }
+  /* --- codes secrets des enfants */
+  function askCode({ title, subtitle = "", avatar = "🔒", error = "" }) {
+    return new Promise((resolve) => {
+      let val = "";
+      const bg = document.createElement("div"); bg.className = "modal-bg";
+      bg.innerHTML = `<div class="card modal stack keypad-modal" role="dialog" aria-label="${esc(title)}">
+        <div style="text-align:center"><div class="avatar big" style="margin:0 auto 8px">${esc(avatar)}</div><h2 style="margin:0">${esc(title)}</h2>
+        <p class="small muted" style="margin:4px 0 0">${esc(subtitle)}</p></div>
+        <div class="code-dots" aria-live="polite"></div>
+        <div class="code-err">${esc(error)}</div>
+        <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((d) => `<button data-d="${d}">${d}</button>`).join("")}
+          <button data-k="del" aria-label="Effacer">⌫</button><button data-d="0">0</button><button data-k="ok" class="ok" aria-label="Valider">✓</button></div>
+        <button class="btn ghost" data-k="cancel">Annuler</button></div>`;
+      document.body.appendChild(bg);
+      const draw = () => { $(".code-dots", bg).innerHTML = Array.from({ length: Math.max(4, val.length) }, (_, i) => `<i class="${i < val.length ? "on" : ""}"></i>`).join(""); };
+      const close = (v) => { document.removeEventListener("keydown", key); bg.remove(); resolve(v); };
+      const press = (k) => {
+        if (k === "del") val = val.slice(0, -1);
+        else if (k === "ok") { if (val.length >= 4) return close(val); $(".code-err", bg).textContent = "Au moins 4 chiffres"; }
+        else if (k === "cancel") return close(null);
+        else if (/^\d$/.test(k) && val.length < 6) val += k;
+        draw();
+      };
+      const key = (e) => { if (/^\d$/.test(e.key)) press(e.key); else if (e.key === "Backspace") press("del"); else if (e.key === "Enter") press("ok"); else if (e.key === "Escape") press("cancel"); };
+      document.addEventListener("keydown", key);
+      bg.addEventListener("click", (e) => { const b = e.target.closest("[data-d],[data-k]"); if (b) press(b.dataset.d ?? b.dataset.k); else if (e.target === bg) close(null); });
+      draw();
+    });
+  }
+  async function chooseNewCode(p, intro) {
+    for (let err = ""; ;) {
+      const a = await askCode({ title: intro || "Choisis ton code secret", subtitle: "4 à 6 chiffres, à garder pour toi", avatar: p.avatar, error: err });
+      if (a === null) return null;
+      const b = await askCode({ title: "Confirme ton code", subtitle: "Tape-le une deuxième fois", avatar: p.avatar });
+      if (b === null) return null;
+      if (a === b) return a;
+      err = "Les deux codes sont différents, recommence.";
+    }
+  }
+  async function logoutCurrent() {
+    if (S.profile && store.get("token", null)) await api(`profiles/${S.profile.id}/logout`, { method: "POST", body: {}, noAuthRedirect: true }).catch(() => {});
+    store.set("token", null); store.set("profile", null); S.profile = null; paintWho();
+  }
+  async function loginProfile(id) {
+    const p = S.profiles.find((x) => x.id === id); if (!p) return;
+    if (S.profile?.id === id && store.get("token", null)) { location.hash = "#/"; return route(); }
+    let err = "";
+    for (;;) {
+      let code = "";
+      if (p.has_code) {
+        code = await askCode({ title: `Bonjour ${p.name} !`, subtitle: "Entre ton code secret", avatar: p.avatar, error: err });
+        if (code === null) return;
+      }
+      try {
+        const r = await api(`profiles/${id}/login`, { method: "POST", body: { code } });
+        await logoutCurrent();
+        store.set("token", r.token);
+        if (r.needs_code) {
+          const nc = await chooseNewCode(p, p.has_code ? "Choisis un nouveau code" : "Crée ton code secret");
+          if (nc === null) { store.set("token", null); return; }
+          await api(`profiles/${id}/setcode`, { method: "POST", body: { code: nc } });
+          p.has_code = true; toast("Code enregistré 🔒");
+        }
+        await selectProfile(id); location.hash = "#/"; return route();
+      } catch (e) {
+        if (!p.has_code) return toast(e.message);
+        err = e.message;
+      }
+    }
+  }
+  async function changeMyCode() {
+    const p = S.profile; if (!p) return;
+    const old = await askCode({ title: "Changer mon code", subtitle: "Entre ton code actuel", avatar: p.avatar }); if (old === null) return;
+    const nc = await chooseNewCode(p, "Choisis ton nouveau code"); if (nc === null) return;
+    try { await api(`profiles/${p.id}/setcode`, { method: "POST", body: { old, code: nc } }); toast("Nouveau code enregistré 🔒"); } catch (e) { toast(e.message); }
+  }
+
   function editProfile(p) {
     let avatar = p?.avatar || AVATARS[S.profiles.length % AVATARS.length], color = p?.color || COLORS[S.profiles.length % COLORS.length];
     const bg = document.createElement("div"); bg.className = "modal-bg";
@@ -317,10 +399,23 @@
       if (t.dataset.col) { color = t.dataset.col; $$("[data-col]", bg).forEach((b) => b.classList.toggle("on", b === t)); }
       if (t.closest("[data-ok]")) {
         const name = $("#pname", bg).value.trim(); if (!name) return $("#pname", bg).focus();
-        const res = p ? await api(`profiles/${p.id}`, { method: "PUT", body: { name, avatar, color } }) : await api("profiles", { method: "POST", body: { name, avatar, color } });
-        bg.remove(); await loadProfiles();
-        if (!p || S.profile?.id === p.id) await selectProfile(res.id);
-        route();
+        try {
+          if (p) {
+            const body = { name, avatar, color };
+            if (S.profile?.id !== p.id) { const st = await api("settings"); if (st.pin) body.pin = prompt("Code parent :") || ""; else body.pin = ""; }
+            await api(`profiles/${p.id}`, { method: "PUT", body });
+            bg.remove(); await loadProfiles(); if (S.profile?.id === p.id) S.profile = S.profiles.find((x) => x.id === p.id); paintWho(); return route();
+          }
+          bg.remove();
+          const st = await api("settings");
+          const pin = st.pin && S.profiles.length ? prompt("Code parent (pour ajouter un enfant) :") || "" : "";
+          const code = await chooseNewCode({ avatar }, `Code secret de ${name}`);
+          if (code === null) return toast("Profil non créé : un code est obligatoire");
+          const res = await api("profiles", { method: "POST", body: { name, avatar, color, code, pin } });
+          await logoutCurrent(); store.set("token", res.token);
+          await loadProfiles(); await selectProfile(res.id); toast(`Profil de ${name} créé 🔒`);
+          location.hash = "#/"; route();
+        } catch (e) { toast(e.message); }
       }
     });
     setTimeout(() => $("#pname", bg)?.focus(), 30);
@@ -749,7 +844,7 @@
     const cells = []; for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) { const c = counts[dayKey(d / 1000)] || 0; cells.push(`<i class="${c >= 15 ? "l3" : c >= 6 ? "l2" : c > 0 ? "l1" : ""}" title="${d.toLocaleDateString("fr-BE")} : ${c}"></i>`); }
     const totalTime = S.state.attempts.reduce((a, x) => a + (x.seconds || 0), 0) + S.state.drills.reduce((a, x) => a + (x.seconds || 0), 0);
     const drillsByKind = {}; for (const d of S.state.drills) (drillsByKind[d.kind] = drillsByKind[d.kind] || []).push(d);
-    render(`<div class="spread"><h1>Progrès de ${esc(S.profile.name)}</h1><a class="btn sm" href="/api/profiles/${S.profile.id}/export" download>⬇️ Exporter (CSV)</a></div>
+    render(`<div class="spread"><h1>Progrès de ${esc(S.profile.name)}</h1><div class="row"><button class="btn sm" id="mycode">🔑 Changer mon code</button><button class="btn sm" id="logout">🚪 Changer d'enfant</button><a class="btn sm" href="/api/profiles/${S.profile.id}/export?token=${encodeURIComponent(store.get("token", ""))}" download>⬇️ Exporter (CSV)</a></div></div>
       <div class="grid g4" style="margin:10px 0 6px">
         <div class="card"><div class="kpi">${Object.keys(S.last).length}</div><div class="small muted">questions travaillées / ${Object.keys(S.Q).length}</div></div>
         <div class="card"><div class="kpi">${S.state.attempts.length}</div><div class="small muted">réponses corrigées</div></div>
@@ -775,6 +870,8 @@
         ${Object.entries(drillsByKind).map(([k, arr]) => { const d = Drills.LIST.find((x) => x.id === k); const avg = pct(arr.reduce((a, x) => a + x.correct, 0), arr.reduce((a, x) => a + x.total, 0)); const l = arr[arr.length - 1]; return `<tr><td>${d ? d.icon + " " + esc(d.title) : esc(k)}</td><td>${arr.length}</td><td>${avg}%</td><td>${l.correct}/${l.total}</td></tr>`; }).join("")}
       </tbody></table></div>` : `<div class="card empty small">Aucun exercice rapide pour l'instant.</div>`}
     `);
+    $("#mycode").addEventListener("click", changeMyCode);
+    $("#logout").addEventListener("click", async () => { await logoutCurrent(); location.hash = "#/profils"; });
     $$("[data-train]").forEach((b) => b.addEventListener("click", () => { const p = store.get("trainPrefs", { groups: [], years: [], n: 10, filter: "notdone" }); p.groups = [b.dataset.train]; store.set("trainPrefs", p); location.hash = "#/entrainement"; }));
   }
 
@@ -890,10 +987,11 @@
     const theme = store.get("theme", "auto");
     const nq = Object.keys(S.Q).length, nc = Object.values(S.Q).filter((q) => q.corr && q.corr.length).length;
     render(`<h1>Espace parent</h1>
+      ${settings.pin ? "" : `<div class="notice" style="margin-bottom:14px">⚠️ Aucun code parent : définis-en un dans <b>Réglages</b>. Il est nécessaire pour réinitialiser le code d'un enfant et protège l'ajout, la suppression et la remise à zéro des profils.</div>`}
       <div class="grid g2">
         <div class="card stack"><h2>Enfants</h2>
-          ${S.profiles.map((p) => `<div class="spread"><div class="row"><span class="avatar" style="background:${esc(p.color)}33">${esc(p.avatar)}</span><b>${esc(p.name)}</b></div>
-            <div class="row"><button class="btn sm" data-edit="${p.id}">Modifier</button><a class="btn sm" href="/api/profiles/${p.id}/export">CSV</a><button class="btn sm" data-reset="${p.id}">Remettre à zéro</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></div></div>`).join("") || `<p class="muted">Aucun profil.</p>`}
+          ${S.profiles.map((p) => `<div class="spread"><div class="row"><span class="avatar" style="background:${esc(p.color)}33">${esc(p.avatar)}</span><b>${esc(p.name)}</b><span class="tiny">${p.has_code ? "🔒 code défini" : "⚠️ code à créer"}</span></div>
+            <div class="row"><button class="btn sm" data-edit="${p.id}">Modifier</button><button class="btn sm" data-csv="${p.id}">CSV</button><button class="btn sm" data-rcode="${p.id}" title="L'enfant choisira un nouveau code à sa prochaine connexion">🔑 Réinitialiser le code</button><button class="btn sm" data-reset="${p.id}">Remettre à zéro</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></div></div>`).join("") || `<p class="muted">Aucun profil.</p>`}
           <div><button class="btn primary" id="add">＋ Ajouter un enfant</button></div></div>
         <div class="card stack"><h2>Réglages</h2>
           <div><div class="small muted" style="margin-bottom:6px">Thème</div><div class="seg-ctl" id="theme">${[["auto", "Automatique"], ["light", "Clair"], ["dark", "Sombre"]].map(([k, l]) => `<button data-t="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
@@ -908,7 +1006,8 @@
           ${st.log.length ? `<pre class="log">${esc(st.log.join("\n"))}</pre>` : ""}</div>
         <div class="card stack"><h2>Conseils</h2>
           <ul class="small" style="margin:0;padding-left:18px">
-            <li>Les questions viennent des épreuves officielles du CEB (Fédération Wallonie-Bruxelles). L'enfant répond sur papier, puis compare avec la correction et note ses points.</li>
+            <li>Les questions viennent des épreuves officielles du CEB (Fédération Wallonie-Bruxelles). L'enfant répond à l'écran (ou sur papier) ; les cases sont corrigées automatiquement quand c'est possible, le reste se compare à la correction officielle.</li>
+            <li>Chaque enfant a son code secret (4 à 6 chiffres). En cas d'oubli : « Réinitialiser le code » (code parent requis), l'enfant en choisit un nouveau à sa prochaine connexion.</li>
             <li>Pour « Écouter », la lecture se fait par la voix de synthèse de l'appareil ; un adulte peut aussi lire le texte affiché.</li>
             <li>Ajoute le site à l'écran d'accueil de la tablette pour l'utiliser comme une application.</li>
             <li>Les données restent sur ton serveur local (aucun compte, aucun envoi externe).</li></ul></div>
@@ -920,6 +1019,18 @@
       const p = S.profiles.find((x) => x.id === +b.dataset.del);
       if (!confirm(`Supprimer définitivement le profil de ${p.name} et toute sa progression ?`)) return;
       try { await api(`profiles/${p.id}`, { method: "DELETE", body: { pin: await askPin() } }); await loadProfiles(); if (S.profile?.id === p.id) { S.profile = null; store.set("profile", null); paintWho(); } viewParent(); } catch (e) { toast(e.message); }
+    }));
+    $$("[data-rcode]").forEach((b) => b.addEventListener("click", async () => {
+      const p = S.profiles.find((x) => x.id === +b.dataset.rcode);
+      if (!settings.pin) return toast("Définis d'abord un code parent (Réglages) : il protège la réinitialisation des codes enfants.", 4000);
+      const pin = prompt(`Code parent — réinitialiser le code de ${p.name} :`); if (pin === null) return;
+      try { await api(`profiles/${p.id}/resetcode`, { method: "POST", body: { pin }, noAuthRedirect: true }); toast(`Code de ${p.name} réinitialisé : il en choisira un nouveau à sa prochaine connexion.`, 3500); await loadProfiles(); if (S.profile?.id === p.id) { store.set("token", null); S.profile = null; paintWho(); } viewParent(); } catch (e) { toast(e.message); }
+    }));
+    $$("[data-csv]").forEach((b) => b.addEventListener("click", async () => {
+      const id = +b.dataset.csv;
+      if (S.profile?.id === id && store.get("token", null)) return window.open(`/api/profiles/${id}/export?token=${encodeURIComponent(store.get("token", ""))}`);
+      if (!settings.pin) return toast("Connecte-toi avec le profil de l'enfant ou définis un code parent pour exporter.", 3500);
+      const pin = prompt("Code parent :"); if (pin) window.open(`/api/profiles/${id}/export?pin=${encodeURIComponent(pin)}`);
     }));
     $$("[data-reset]").forEach((b) => b.addEventListener("click", async () => {
       const p = S.profiles.find((x) => x.id === +b.dataset.reset);

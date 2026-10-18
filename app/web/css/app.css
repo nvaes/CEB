@@ -306,3 +306,15 @@ pre.log { white-space: pre-wrap; font-size: .78rem; background: var(--paper-2); 
 .ia-mark { position: absolute; transform: translate(-50%, -50%); font-size: 3.2cqw; font-weight: 900; color: #2547d0; line-height: 1; cursor: pointer; user-select: none; }
 .ia-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .segia { cursor: default; }
+
+/* ---------- code secret enfant */
+.keypad-modal { width: min(360px, 100%); }
+.code-dots { display: flex; justify-content: center; gap: 12px; min-height: 22px; }
+.code-dots i { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--ink-3); }
+.code-dots i.on { background: var(--accent); border-color: var(--accent); }
+.code-err { text-align: center; color: var(--ko); font-weight: 650; min-height: 1.3em; font-size: .92rem; }
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.keypad button { min-height: 62px; border-radius: 16px; border: 1px solid var(--line); background: var(--paper-2); font-size: 1.5rem;
+  font-weight: 800; font-family: var(--font-round); cursor: pointer; color: var(--ink); }
+.keypad button:active { transform: scale(.97); }
+.keypad button.ok { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }

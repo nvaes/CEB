@@ -7,7 +7,9 @@ Serveur du site « Révision CEB » — bibliothèque standard Python uniquement
 - lance la (re)construction du catalogue en arrière-plan au démarrage
 """
 import hashlib
+import hmac
 import json
+import secrets
 import mimetypes
 import os
 import re
@@ -105,6 +107,8 @@ CREATE TABLE IF NOT EXISTS notes(
   profile INTEGER NOT NULL, qid TEXT NOT NULL, flag INTEGER DEFAULT 0, note TEXT,
   ts REAL, PRIMARY KEY(profile, qid));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS tokens(
+  token TEXT PRIMARY KEY, profile INTEGER NOT NULL, created REAL NOT NULL, last REAL);
 CREATE TABLE IF NOT EXISTS answers(
   profile INTEGER NOT NULL, qid TEXT NOT NULL, data TEXT, ts REAL, PRIMARY KEY(profile, qid));
 """
@@ -122,6 +126,9 @@ def init_db():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     with db() as con:
         con.executescript(SCHEMA)
+        cols = [r[1] for r in con.execute("PRAGMA table_info(profiles)")]
+        if "code" not in cols:  # migration : code secret par enfant
+            con.execute("ALTER TABLE profiles ADD COLUMN code TEXT")
 
 
 def rows(sql, args=()):
@@ -162,6 +169,48 @@ def pdf_path(name):
         if os.path.isfile(p):
             return p
     return None
+
+
+# ------------------------------------------------------------------ codes enfants
+CODE_RE = re.compile(r"\d{4,6}")
+TOKEN_DAYS = int(os.environ.get("CEB_TOKEN_DAYS", "60"))
+_fails = {}  # profil -> (nombre d'échecs, verrouillé jusqu'à)
+PUBLIC_PROFILE = "id, name, avatar, color, created, (code IS NOT NULL AND code <> '') AS has_code"
+
+
+def code_hash(code, salt=None):
+    salt = salt or secrets.token_hex(8)
+    h = hashlib.pbkdf2_hmac("sha256", str(code).encode(), bytes.fromhex(salt), 60000).hex()
+    return f"{salt}${h}"
+
+
+def code_ok(code, stored):
+    if not stored or "$" not in stored:
+        return False
+    salt, _ = stored.split("$", 1)
+    return hmac.compare_digest(code_hash(code, salt), stored)
+
+
+def new_token(pid):
+    tok = secrets.token_urlsafe(24)
+    execute("INSERT INTO tokens(token,profile,created,last) VALUES(?,?,?,?)", (tok, pid, time.time(), time.time()))
+    return tok
+
+
+def token_profile(tok):
+    if not tok:
+        return None
+    r = rows("SELECT profile, created FROM tokens WHERE token=?", (tok,))
+    if not r or time.time() - r[0]["created"] > TOKEN_DAYS * 86400:
+        return None
+    return r[0]["profile"]
+
+
+def public_profile(pid):
+    r = rows(f"SELECT {PUBLIC_PROFILE} FROM profiles WHERE id=?", (pid,))
+    if r:
+        r[0]["has_code"] = bool(r[0]["has_code"])
+    return r[0] if r else None
 
 
 def pin_hash(pin):
@@ -227,6 +276,17 @@ class Handler(BaseHTTPRequestHandler):
         h = get_setting("pin")
         return not h or pin_hash(data.get("pin", "")) == h
 
+    def strict_pin(self, data):
+        """Code parent obligatoire (doit exister et être correct)."""
+        h = get_setting("pin")
+        return bool(h) and pin_hash(data.get("pin", "")) == h
+
+    def profile_token(self, qs=None):
+        tok = self.headers.get("X-Profile-Token") or ""
+        if not tok and qs:
+            tok = (qs.get("token") or [""])[0]
+        return tok
+
     # -- routage
     def do_HEAD(self):
         self.do_GET()
@@ -266,7 +326,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path.rstrip("/") == "/api/upload":
             return self.upload(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         try:
-            data = self.body() if method in ("POST", "PUT", "DELETE") else {}
+            data = self.body() if method in ("POST", "PUT", "DELETE") else (
+                {"pin": qs["pin"][0]} if qs.get("pin") else {})
         except Exception:
             return self.error(400, "JSON invalide")
         try:
@@ -396,27 +457,75 @@ class Handler(BaseHTTPRequestHandler):
         if head == "profiles":
             if len(parts) == 1:
                 if method == "GET":
-                    return self.send_json(rows("SELECT * FROM profiles WHERE archived=0 ORDER BY id"))
+                    out = rows(f"SELECT {PUBLIC_PROFILE} FROM profiles WHERE archived=0 ORDER BY id")
+                    for p in out:
+                        p["has_code"] = bool(p["has_code"])
+                    return self.send_json(out)
                 if method == "POST":
                     name = (data.get("name") or "").strip()[:40]
+                    code = str(data.get("code") or "")
                     if not name:
                         return self.error(400, "prénom requis")
-                    pid = execute("INSERT INTO profiles(name,avatar,color,created) VALUES(?,?,?,?)",
-                                  (name, data.get("avatar", "🦊")[:8], data.get("color", "#4f6df5")[:16],
-                                   time.time()))
-                    return self.send_json(rows("SELECT * FROM profiles WHERE id=?", (pid,))[0], 201)
+                    if not CODE_RE.fullmatch(code):
+                        return self.error(400, "le code de l'enfant doit contenir 4 à 6 chiffres")
+                    if get_setting("pin") and rows("SELECT id FROM profiles LIMIT 1") and not self.check_pin(data):
+                        return self.error(403, "code parent incorrect")
+                    pid = execute("INSERT INTO profiles(name,avatar,color,created,code) VALUES(?,?,?,?,?)",
+                                  (name, str(data.get("avatar", "🦊"))[:8], str(data.get("color", "#4f6df5"))[:16],
+                                   time.time(), code_hash(code)))
+                    return self.send_json({**public_profile(pid), "token": new_token(pid)}, 201)
             pid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             if pid is None or not rows("SELECT id FROM profiles WHERE id=?", (pid,)):
                 return self.error(404, "profil inconnu")
             sub = parts[2] if len(parts) > 2 else ""
+            prof = rows("SELECT code FROM profiles WHERE id=?", (pid,))[0]
+            if sub == "login" and method == "POST":
+                n, until = _fails.get(pid, (0, 0))
+                if until > time.time():
+                    return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
+                code = str(data.get("code") or "")
+                if not prof["code"]:
+                    # code réinitialisé par un parent : accès accordé, l'enfant doit choisir un nouveau code
+                    return self.send_json({"token": new_token(pid), "needs_code": True})
+                if code_ok(code, prof["code"]) or (data.get("pin") and self.strict_pin(data)):
+                    _fails.pop(pid, None)
+                    return self.send_json({"token": new_token(pid), "needs_code": False})
+                n += 1
+                _fails[pid] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
+                return self.error(403, "code incorrect" + (" — accès bloqué 30 s" if n >= 5 else ""))
+            if sub == "resetcode" and method == "POST":
+                if not get_setting("pin"):
+                    return self.error(412, "définis d'abord un code parent (Espace parent → Réglages)")
+                if not self.strict_pin(data):
+                    return self.error(403, "code parent incorrect")
+                execute("UPDATE profiles SET code=NULL WHERE id=?", (pid,))
+                execute("DELETE FROM tokens WHERE profile=?", (pid,))
+                _fails.pop(pid, None)
+                return self.send_json({"ok": True})
+            parent_only = (sub == "" and method == "DELETE") or (sub == "reset" and method == "POST")
+            authed = token_profile(self.profile_token(qs)) == pid
+            parent_edit = sub == "" and method == "PUT" and "pin" in data and self.check_pin(data)
+            if not (parent_only or authed or parent_edit or ("pin" in data and self.strict_pin(data))):
+                return self.error(401, "code de l'enfant requis")
+            if sub == "logout" and method == "POST":
+                execute("DELETE FROM tokens WHERE token=?", (self.profile_token(qs),))
+                return self.send_json({"ok": True})
+            if sub == "setcode" and method == "POST":
+                code = str(data.get("code") or "")
+                if not CODE_RE.fullmatch(code):
+                    return self.error(400, "le code doit contenir 4 à 6 chiffres")
+                if prof["code"] and not code_ok(str(data.get("old") or ""), prof["code"]):
+                    return self.error(403, "ancien code incorrect")
+                execute("UPDATE profiles SET code=? WHERE id=?", (code_hash(code), pid))
+                return self.send_json({"ok": True})
             if sub == "" and method == "PUT":
                 execute("UPDATE profiles SET name=COALESCE(?,name), avatar=COALESCE(?,avatar), color=COALESCE(?,color) WHERE id=?",
                         (data.get("name"), data.get("avatar"), data.get("color"), pid))
-                return self.send_json(rows("SELECT * FROM profiles WHERE id=?", (pid,))[0])
+                return self.send_json(public_profile(pid))
             if sub == "" and method == "DELETE":
                 if not self.check_pin(data):
                     return self.error(403, "code parent incorrect")
-                for t in ("attempts", "exams", "drills", "notes", "answers"):
+                for t in ("attempts", "exams", "drills", "notes", "answers", "tokens"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
                 execute("DELETE FROM profiles WHERE id=?", (pid,))
                 return self.send_json({"ok": True})
