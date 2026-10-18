@@ -25,9 +25,11 @@
     const headers = opts.body ? { "Content-Type": "application/json" } : {};
     const tok = store.get("token", null);
     if (tok && /^profiles\/\d+/.test(path)) headers["X-Profile-Token"] = tok;
+    if (S.ptoken) headers["X-Parent-Token"] = S.ptoken;
     const res = await fetch("/api/" + path, { method: opts.method || "GET", headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
     const data = await res.json().catch(() => ({}));
-    if (res.status === 401 && /^profiles\/\d+/.test(path) && !opts.noAuthRedirect) {
+    if (res.status === 403 && S.ptoken && /code parent/.test(data.error || "")) { S.ptoken = null; }  // session parent expirée
+    if (res.status === 401 && /^profiles\/\d+/.test(path) && !opts.noAuthRedirect && !S.ptoken) {
       // session de l'enfant expirée ou code réinitialisé : retour à l'écran des profils
       store.set("token", null); store.set("profile", null); S.profile = null; paintWho();
       location.hash = "#/profils"; setTimeout(route, 0);
@@ -281,7 +283,7 @@
         <a class="card tile" href="#/exercices"><span class="ico">⚡</span><b>Exercices rapides</b><span class="small muted">${recentDrills ? `Dernier : ${recentDrills.correct}/${recentDrills.total}` : "Calcul, conversions, conjugaison…"}</span></a>
         <a class="card tile" href="#/epreuves"><span class="ico">📚</span><b>Toutes les épreuves</b><span class="small muted">${S.years.length} années · ${Object.keys(S.Q).length} questions</span></a>
       </div>
-      <div class="section-title"><h2>Ma progression</h2><a href="#/progres" class="small">Détails →</a></div>
+      <div class="section-title"><h2>Ma progression</h2></div>
       <div class="grid g3">${discCards}</div>
       <p class="tiny" style="margin-top:22px">Le pourcentage indique les points obtenus sur les questions déjà faites (dernier essai). La barre montre la part des questions déjà travaillées.</p>
     `);
@@ -302,12 +304,12 @@
         ${S.profiles.map((p) => `<button class="profile-card" data-id="${p.id}"><span class="avatar big" style="background:${esc(p.color)}33">${esc(p.avatar)}</span>${esc(p.name)}</button>`).join("")}
         <button class="profile-card" data-new="1" style="border-style:dashed"><span class="avatar big">＋</span>Ajouter</button>
       </div>
-      <p class="tiny" style="margin-top:28px">🔒 Chaque enfant entre son code secret. Code oublié ? Un parent peut le réinitialiser dans l'<a href="#/parent">Espace parent</a>.</p>`);
+      <p class="tiny" style="margin-top:28px">🔒 Chaque enfant entre son code secret. Code oublié ? Un parent peut le réinitialiser dans l'<a href="#/parent/enfants">espace Parents</a>.</p>`);
     $$("[data-id]").forEach((b) => b.addEventListener("click", () => loginProfile(+b.dataset.id)));
     $("[data-new]").addEventListener("click", () => editProfile());
   }
   /* --- codes secrets des enfants */
-  function askCode({ title, subtitle = "", avatar = "🔒", error = "" }) {
+  function askCode({ title, subtitle = "", avatar = "🔒", error = "", maxLen = 6 }) {
     return new Promise((resolve) => {
       let val = "";
       const bg = document.createElement("div"); bg.className = "modal-bg";
@@ -326,7 +328,7 @@
         if (k === "del") val = val.slice(0, -1);
         else if (k === "ok") { if (val.length >= 4) return close(val); $(".code-err", bg).textContent = "Au moins 4 chiffres"; }
         else if (k === "cancel") return close(null);
-        else if (/^\d$/.test(k) && val.length < 6) val += k;
+        else if (/^\d$/.test(k) && val.length < maxLen) val += k;
         draw();
       };
       const key = (e) => { if (/^\d$/.test(e.key)) press(e.key); else if (e.key === "Backspace") press("del"); else if (e.key === "Enter") press("ok"); else if (e.key === "Escape") press("cancel"); };
@@ -402,16 +404,19 @@
         try {
           if (p) {
             const body = { name, avatar, color };
-            if (S.profile?.id !== p.id) { const st = await api("settings"); if (st.pin) body.pin = prompt("Code parent :") || ""; else body.pin = ""; }
+            if (S.profile?.id !== p.id) { if (!(await parentGate())) return; body.pin = ""; }
             await api(`profiles/${p.id}`, { method: "PUT", body });
             bg.remove(); await loadProfiles(); if (S.profile?.id === p.id) S.profile = S.profiles.find((x) => x.id === p.id); paintWho(); return route();
           }
           bg.remove();
-          const st = await api("settings");
-          const pin = st.pin && S.profiles.length ? prompt("Code parent (pour ajouter un enfant) :") || "" : "";
+          if (!(await parentGate("Ajouter un enfant est réservé aux parents."))) return;
+          const pin = "";
           const code = await chooseNewCode({ avatar }, `Code secret de ${name}`);
           if (code === null) return toast("Profil non créé : un code est obligatoire");
           const res = await api("profiles", { method: "POST", body: { name, avatar, color, code, pin } });
+          if (location.hash.startsWith("#/parent")) {  // ajout depuis l'espace Parents : on y reste
+            toast(`Profil de ${name} créé 🔒`); return viewParent("enfants");
+          }
           await logoutCurrent(); store.set("token", res.token);
           await loadProfiles(); await selectProfile(res.id); toast(`Profil de ${name} créé 🔒`);
           location.hash = "#/"; route();
@@ -835,7 +840,8 @@
   }
 
   /* ================================================================ progrès */
-  function viewProgress() {
+  function progressHTML(child) {
+    // S.state / S.last ont été préparés pour cet enfant par viewParentProgress
     const disc = Object.entries(DISC).map(([id, d]) => { const s = stats((q) => q.livret.discipline === id); return { id, d, s }; });
     const groups = GROUPS.map((g) => ({ g, s: stats((q) => groupOf(q.livret.subject) === g.id) }));
     // carte d'activité (12 semaines)
@@ -844,7 +850,7 @@
     const cells = []; for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) { const c = counts[dayKey(d / 1000)] || 0; cells.push(`<i class="${c >= 15 ? "l3" : c >= 6 ? "l2" : c > 0 ? "l1" : ""}" title="${d.toLocaleDateString("fr-BE")} : ${c}"></i>`); }
     const totalTime = S.state.attempts.reduce((a, x) => a + (x.seconds || 0), 0) + S.state.drills.reduce((a, x) => a + (x.seconds || 0), 0);
     const drillsByKind = {}; for (const d of S.state.drills) (drillsByKind[d.kind] = drillsByKind[d.kind] || []).push(d);
-    render(`<div class="spread"><h1>Progrès de ${esc(S.profile.name)}</h1><div class="row"><button class="btn sm" id="mycode">🔑 Changer mon code</button><button class="btn sm" id="logout">🚪 Changer d'enfant</button><a class="btn sm" href="/api/profiles/${S.profile.id}/export?token=${encodeURIComponent(store.get("token", ""))}" download>⬇️ Exporter (CSV)</a></div></div>
+    return (`<div class="spread"><h2 style="margin:0">Progrès de ${esc(child.name)}</h2><div class="row"><a class="btn sm" href="/api/profiles/${child.id}/export?ptoken=${encodeURIComponent(S.ptoken || "")}" download>⬇️ Exporter (CSV)</a></div></div>
       <div class="grid g4" style="margin:10px 0 6px">
         <div class="card"><div class="kpi">${Object.keys(S.last).length}</div><div class="small muted">questions travaillées / ${Object.keys(S.Q).length}</div></div>
         <div class="card"><div class="kpi">${S.state.attempts.length}</div><div class="small muted">réponses corrigées</div></div>
@@ -856,7 +862,7 @@
       <div class="card table-wrap"><table><thead><tr><th>Matière</th><th>Faites</th><th style="width:40%">Réussite (points)</th><th></th></tr></thead><tbody>
         ${groups.map(({ g, s }) => `<tr><td>${SUBJECT_ICON[g.id] || ""} ${g.label}</td><td class="small">${s.done}/${s.total}</td>
           <td><div class="row" style="gap:8px;flex-wrap:nowrap"><div class="bar" style="flex:1"><i class="${s.mastery >= 75 ? "ok" : s.mastery >= 50 ? "mid" : "ko"}" style="width:${s.max ? s.mastery : 0}%"></i></div><span class="small" style="width:40px">${s.max ? s.mastery + "%" : "–"}</span></div></td>
-          <td><button class="btn sm" data-train="${g.id}">S'entraîner</button></td></tr>`).join("")}
+          <td></td></tr>`).join("")}
       </tbody></table></div>
       <div class="section-title"><h2>Activité (12 semaines)</h2></div>
       <div class="card" style="overflow-x:auto"><div class="heat">${cells.join("")}</div></div>
@@ -870,27 +876,24 @@
         ${Object.entries(drillsByKind).map(([k, arr]) => { const d = Drills.LIST.find((x) => x.id === k); const avg = pct(arr.reduce((a, x) => a + x.correct, 0), arr.reduce((a, x) => a + x.total, 0)); const l = arr[arr.length - 1]; return `<tr><td>${d ? d.icon + " " + esc(d.title) : esc(k)}</td><td>${arr.length}</td><td>${avg}%</td><td>${l.correct}/${l.total}</td></tr>`; }).join("")}
       </tbody></table></div>` : `<div class="card empty small">Aucun exercice rapide pour l'instant.</div>`}
     `);
-    $("#mycode").addEventListener("click", changeMyCode);
-    $("#logout").addEventListener("click", async () => { await logoutCurrent(); location.hash = "#/profils"; });
-    $$("[data-train]").forEach((b) => b.addEventListener("click", () => { const p = store.get("trainPrefs", { groups: [], years: [], n: 10, filter: "notdone" }); p.groups = [b.dataset.train]; store.set("trainPrefs", p); location.hash = "#/entrainement"; }));
   }
 
   /* ================================================================ fichiers CEB (téléversement) */
   const KIND_LABEL = { questionnaire: "Questionnaire", correction: "Correction", portfolio: "Portfolio" };
   async function viewFiles() {
-    const st = await api("status"); const settings = await api("settings");
+    const st = await api("status");
     const byYear = {};
     for (const f of st.files) { const m = f.name.match(/^(\d{4})_CEB_([a-z]+)/i); if (!m) continue; (byYear[m[1]] = byYear[m[1]] || []).push({ ...f, kind: m[2].toLowerCase().replace(/s$/, "") }); }
     const nextYear = String(Math.max(new Date().getFullYear(), ...Object.keys(byYear).map(Number).map((y) => y + 1).filter((y) => y <= new Date().getFullYear() + 1)));
     const mb = (n) => (n / 1048576).toFixed(1).replace(".", ",") + " Mo";
-    render(`<h1>Fichiers CEB</h1>
+    render(parentShell("fichiers", `<h2>Fichiers CEB</h2>
       <p class="muted">Ajoute les épreuves d'une nouvelle année (ou remplace un fichier) : le site les découpe automatiquement en questions, corrections et réponses interactives.</p>
       <div class="grid g2">
         <div class="card stack" id="up">
           <h2>📤 Ajouter une année</h2>
           <label class="row"><span class="small muted" style="width:110px">Année</span><input type="number" id="upyear" min="2000" max="2099" value="${nextYear}" style="width:120px"></label>
           ${Object.entries(KIND_LABEL).map(([k, l]) => `<label class="row"><span class="small muted" style="width:110px">${l}</span><input type="file" accept="application/pdf,.pdf" data-kind="${k}" style="flex:1;min-width:0"></label>`).join("")}
-          <p class="tiny" style="margin:0">Les trois PDF officiels sont publiés chaque année par la Fédération Wallonie-Bruxelles. Le portfolio est facultatif mais recommandé. ${settings.pin ? "Le code parent sera demandé." : ""}</p>
+          <p class="tiny" style="margin:0">Les trois PDF officiels sont publiés chaque année par la Fédération Wallonie-Bruxelles. Le portfolio est facultatif mais recommandé.</p>
           <div class="bar hidden" id="upbar" style="height:10px"><i class="ok" style="width:0%"></i></div>
           <div class="small" id="upmsg"></div>
           <div class="row"><button class="btn primary" id="upgo">Envoyer et analyser</button></div>
@@ -916,12 +919,13 @@
         <div class="row"><select id="cfgyear">${S.years.map((y) => `<option value="${y.id}">${esc(y.label)}${y.auto ? " (détection auto)" : ""}</option>`).join("")}</select><button class="btn sm" id="cfgload">Afficher</button></div>
         <textarea id="cfgtext" rows="12" spellcheck="false" style="font-family:ui-monospace,monospace;font-size:.85rem;width:100%" class="hidden"></textarea>
         <div class="row hidden" id="cfgbtns"><button class="btn primary" id="cfgsave">Enregistrer et relancer l'analyse</button><button class="btn ghost" id="cfgreset">Revenir à la détection automatique</button></div>
-      </div>`);
-    const askPin = async () => (settings.pin ? prompt("Code parent :") || "" : "");
+      </div>`), true);
+    bindShell();
+    const askPin = async () => "";
     const upload = (file, year, kind, pin, onProgress) => new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `/api/upload?year=${encodeURIComponent(year)}&kind=${kind}`);
-      xhr.setRequestHeader("Content-Type", "application/pdf"); xhr.setRequestHeader("X-Pin", pin);
+      xhr.setRequestHeader("Content-Type", "application/pdf"); xhr.setRequestHeader("X-Parent-Token", S.ptoken || "");
       xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
       xhr.onload = () => { let d = {}; try { d = JSON.parse(xhr.responseText); } catch (e) { /* */ } xhr.status < 300 ? resolve(d) : reject(new Error(d.error || xhr.statusText)); };
       xhr.onerror = () => reject(new Error("connexion interrompue"));
@@ -974,7 +978,7 @@
       if (!st.building) {
         if (st.rc === 0) {
           const res = await fetch("/api/catalog"); if (res.ok) indexCatalog(await res.json());
-          toast("Analyse terminée ✔"); if (location.hash === "#/fichiers") viewFiles();
+          toast("Analyse terminée ✔"); if (location.hash === "#/parent/fichiers") viewFiles();
         } else toast("L'analyse a rencontré une erreur (voir le journal)");
         return;
       }
@@ -982,65 +986,121 @@
   }
 
   /* ================================================================ espace parent */
-  async function viewParent() {
-    const st = await api("status"); const settings = await api("settings");
-    const theme = store.get("theme", "auto");
-    const nq = Object.keys(S.Q).length, nc = Object.values(S.Q).filter((q) => q.corr && q.corr.length).length;
-    render(`<h1>Espace parent</h1>
-      ${settings.pin ? "" : `<div class="notice" style="margin-bottom:14px">⚠️ Aucun code parent : définis-en un dans <b>Réglages</b>. Il est nécessaire pour réinitialiser le code d'un enfant et protège l'ajout, la suppression et la remise à zéro des profils.</div>`}
-      <div class="grid g2">
-        <div class="card stack"><h2>Enfants</h2>
-          ${S.profiles.map((p) => `<div class="spread"><div class="row"><span class="avatar" style="background:${esc(p.color)}33">${esc(p.avatar)}</span><b>${esc(p.name)}</b><span class="tiny">${p.has_code ? "🔒 code défini" : "⚠️ code à créer"}</span></div>
-            <div class="row"><button class="btn sm" data-edit="${p.id}">Modifier</button><button class="btn sm" data-csv="${p.id}">CSV</button><button class="btn sm" data-rcode="${p.id}" title="L'enfant choisira un nouveau code à sa prochaine connexion">🔑 Réinitialiser le code</button><button class="btn sm" data-reset="${p.id}">Remettre à zéro</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></div></div>`).join("") || `<p class="muted">Aucun profil.</p>`}
-          <div><button class="btn primary" id="add">＋ Ajouter un enfant</button></div></div>
-        <div class="card stack"><h2>Réglages</h2>
-          <div><div class="small muted" style="margin-bottom:6px">Thème</div><div class="seg-ctl" id="theme">${[["auto", "Automatique"], ["light", "Clair"], ["dark", "Sombre"]].map(([k, l]) => `<button data-t="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
-          <div><div class="small muted" style="margin-bottom:6px">Code parent ${settings.pin ? "(actif)" : "(aucun)"} — protège la suppression et la remise à zéro</div>
-            <div class="row"><input type="password" id="newpin" inputmode="numeric" placeholder="Nouveau code (4-8 chiffres)" style="width:220px"><button class="btn" id="setpin">${settings.pin ? "Changer" : "Définir"}</button>${settings.pin ? `<button class="btn ghost" id="clrpin">Retirer</button>` : ""}</div></div>
-        </div>
-        <div class="card stack"><h2>Épreuves chargées</h2>
-          <p class="small">${S.years.length} années · ${nq} questions · ${nc} avec correction ciblée (${pct(nc, nq)}%). Construit le ${esc(S.catalog.built)}.</p>
-          <p class="small muted">Dossier PDF : <code>${esc(st.pdf_dir)}</code><br>${st.pdfs.length} fichiers : ${st.pdfs.map(esc).join(", ")}</p>
-          <p class="small muted">Pour ajouter une année, dépose ses trois PDF (<code>AAAA_CEB_questionnaire.pdf</code>, <code>AAAA_CEB_correction.pdf</code>, <code>AAAA_CEB_portfolio.pdf</code>) dans ce dossier puis reconstruis.</p>
-          <div class="row"><a class="btn primary" href="#/fichiers">📤 Ajouter / gérer les fichiers CEB</a><button class="btn" id="rebuild">🔄 Reconstruire le catalogue</button>${st.building ? `<span class="chip">construction en cours…</span>` : ""}</div>
-          ${st.log.length ? `<pre class="log">${esc(st.log.join("\n"))}</pre>` : ""}</div>
-        <div class="card stack"><h2>Conseils</h2>
-          <ul class="small" style="margin:0;padding-left:18px">
-            <li>Les questions viennent des épreuves officielles du CEB (Fédération Wallonie-Bruxelles). L'enfant répond à l'écran (ou sur papier) ; les cases sont corrigées automatiquement quand c'est possible, le reste se compare à la correction officielle.</li>
-            <li>Chaque enfant a son code secret (4 à 6 chiffres). En cas d'oubli : « Réinitialiser le code » (code parent requis), l'enfant en choisit un nouveau à sa prochaine connexion.</li>
-            <li>Pour « Écouter », la lecture se fait par la voix de synthèse de l'appareil ; un adulte peut aussi lire le texte affiché.</li>
-            <li>Ajoute le site à l'écran d'accueil de la tablette pour l'utiliser comme une application.</li>
-            <li>Les données restent sur ton serveur local (aucun compte, aucun envoi externe).</li></ul></div>
-      </div>`);
-    const askPin = async () => (settings.pin ? prompt("Code parent :") : "");
+  /* --- accès parent : code demandé à chaque entrée (session de quelques heures, en mémoire seulement) */
+  async function parentGate(reason = "") {
+    if (S.ptoken) {
+      try { const r = await api("parent/check", { method: "POST", body: {} }); if (r.ok) return true; } catch (e) { /* */ }
+      S.ptoken = null;
+    }
+    const st = await api("settings");
+    if (!st.pin) {
+      // premier accès : création obligatoire du code parent
+      for (let err = ""; ;) {
+        const a = await askCode({ title: "Crée le code parent", subtitle: (reason ? reason + " " : "") + "4 à 8 chiffres, à ne pas communiquer aux enfants.", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
+        if (a === null) return false;
+        const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", maxLen: 8 });
+        if (b === null) return false;
+        if (a !== b) { err = "Les deux codes sont différents."; continue; }
+        try { const r = await api("parent/setup", { method: "POST", body: { new_pin: a } }); S.ptoken = r.token; toast("Code parent créé 🔒"); return true; } catch (e) { err = e.message; }
+      }
+    }
+    for (let err = ""; ;) {
+      const pin = await askCode({ title: "Espace Parents", subtitle: reason || "Entre le code parent", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
+      if (pin === null) return false;
+      try { const r = await api("parent/login", { method: "POST", body: { pin } }); S.ptoken = r.token; return true; } catch (e) { err = e.message; }
+    }
+  }
+  async function parentLock() {
+    if (S.ptoken) await api("parent/logout", { method: "POST", body: {} }).catch(() => {});
+    S.ptoken = null; location.hash = S.profile ? "#/" : "#/profils";
+  }
+  const PARENT_TABS = [["progres", "📈 Progrès"], ["fichiers", "📤 Fichiers CEB"], ["enfants", "👨‍👩‍👧 Enfants"], ["reglages", "⚙️ Réglages"]];
+  function parentShell(tab, inner) {
+    return `<div class="spread"><h1 style="margin:0">Espace Parents</h1><button class="btn sm" data-plock>🔒 Verrouiller</button></div>
+      <div class="seg-ctl" style="margin:12px 0 18px">${PARENT_TABS.map(([k, l]) => `<button data-ptab="${k}" class="${k === tab ? "on" : ""}">${l}</button>`).join("")}</div>${inner}`;
+  }
+  function bindShell() {
+    $$("[data-ptab]").forEach((b) => b.addEventListener("click", () => { location.hash = `#/parent/${b.dataset.ptab}`; }));
+    $("[data-plock]")?.addEventListener("click", parentLock);
+  }
+  async function viewParent(tab = "progres", arg) {
+    if (!(await parentGate())) { location.hash = S.profile ? "#/" : "#/profils"; return; }
+    await loadProfiles();
+    if (tab === "fichiers") return viewFiles();
+    if (tab === "enfants") return viewParentChildren();
+    if (tab === "reglages") return viewParentSettings();
+    return viewParentProgress(arg);
+  }
+  async function viewParentProgress(childId) {
+    if (!S.profiles.length) { render(parentShell("progres", `<div class="card empty">Aucun enfant pour l'instant. <a href="#/parent/enfants">Ajouter un enfant</a></div>`), true); return bindShell(); }
+    const child = S.profiles.find((p) => p.id === +childId) || S.profiles[0];
+    const state = await api(`profiles/${child.id}/state`);
+    // calcule les statistiques avec l'état de cet enfant, puis restaure l'état de la session en cours
+    const saved = { profile: S.profile, state: S.state, last: S.last, hist: S.hist, flags: S.flags };
+    S.profile = child; S.state = state; derive();
+    let html;
+    try { html = progressHTML(child); } finally { Object.assign(S, saved); }
+    const overview = S.profiles.map((p) => `<button class="btn sm ${p.id === child.id ? "primary" : ""}" data-child="${p.id}"><span>${esc(p.avatar)}</span> ${esc(p.name)}</button>`).join("");
+    render(parentShell("progres", `<div class="row" style="margin-bottom:14px">${overview}</div>${html}`), true);
+    bindShell();
+    $$("[data-child]").forEach((b) => b.addEventListener("click", () => { location.hash = `#/parent/progres/${b.dataset.child}`; }));
+  }
+  async function viewParentChildren() {
+    render(parentShell("enfants", `<div class="card stack" style="max-width:860px"><h2>Enfants</h2>
+      ${S.profiles.map((p) => `<div class="spread" style="border-bottom:1px solid var(--line);padding-bottom:10px"><div class="row"><span class="avatar" style="background:${esc(p.color)}33">${esc(p.avatar)}</span><b>${esc(p.name)}</b><span class="tiny">${p.has_code ? "🔒 code défini" : "⚠️ code à créer à la prochaine connexion"}</span></div>
+        <div class="row"><button class="btn sm" data-edit="${p.id}">Modifier</button><button class="btn sm" data-rcode="${p.id}" title="L'enfant choisira un nouveau code à sa prochaine connexion">🔑 Réinitialiser le code</button><button class="btn sm" data-reset="${p.id}">Remettre à zéro</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></div></div>`).join("") || `<p class="muted">Aucun profil.</p>`}
+      <div><button class="btn primary" id="add">＋ Ajouter un enfant</button></div>
+      <p class="tiny" style="margin:0">« Réinitialiser le code » efface le code de l'enfant et le déconnecte de tous les appareils : il choisira un nouveau code à sa prochaine connexion.</p></div>`), true);
+    bindShell();
     $("#add").addEventListener("click", () => editProfile());
     $$("[data-edit]").forEach((b) => b.addEventListener("click", () => editProfile(S.profiles.find((p) => p.id === +b.dataset.edit))));
     $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {
       const p = S.profiles.find((x) => x.id === +b.dataset.del);
       if (!confirm(`Supprimer définitivement le profil de ${p.name} et toute sa progression ?`)) return;
-      try { await api(`profiles/${p.id}`, { method: "DELETE", body: { pin: await askPin() } }); await loadProfiles(); if (S.profile?.id === p.id) { S.profile = null; store.set("profile", null); paintWho(); } viewParent(); } catch (e) { toast(e.message); }
+      try { await api(`profiles/${p.id}`, { method: "DELETE", body: {} }); if (S.profile?.id === p.id) { S.profile = null; store.set("profile", null); store.set("token", null); paintWho(); } viewParent("enfants"); } catch (e) { toast(e.message); }
     }));
     $$("[data-rcode]").forEach((b) => b.addEventListener("click", async () => {
       const p = S.profiles.find((x) => x.id === +b.dataset.rcode);
-      if (!settings.pin) return toast("Définis d'abord un code parent (Réglages) : il protège la réinitialisation des codes enfants.", 4000);
-      const pin = prompt(`Code parent — réinitialiser le code de ${p.name} :`); if (pin === null) return;
-      try { await api(`profiles/${p.id}/resetcode`, { method: "POST", body: { pin }, noAuthRedirect: true }); toast(`Code de ${p.name} réinitialisé : il en choisira un nouveau à sa prochaine connexion.`, 3500); await loadProfiles(); if (S.profile?.id === p.id) { store.set("token", null); S.profile = null; paintWho(); } viewParent(); } catch (e) { toast(e.message); }
-    }));
-    $$("[data-csv]").forEach((b) => b.addEventListener("click", async () => {
-      const id = +b.dataset.csv;
-      if (S.profile?.id === id && store.get("token", null)) return window.open(`/api/profiles/${id}/export?token=${encodeURIComponent(store.get("token", ""))}`);
-      if (!settings.pin) return toast("Connecte-toi avec le profil de l'enfant ou définis un code parent pour exporter.", 3500);
-      const pin = prompt("Code parent :"); if (pin) window.open(`/api/profiles/${id}/export?pin=${encodeURIComponent(pin)}`);
+      if (!confirm(`Réinitialiser le code de ${p.name} ?`)) return;
+      try { await api(`profiles/${p.id}/resetcode`, { method: "POST", body: {}, noAuthRedirect: true }); toast(`Code de ${p.name} réinitialisé : il en choisira un nouveau à sa prochaine connexion.`, 3500); if (S.profile?.id === p.id) { store.set("token", null); S.profile = null; paintWho(); } viewParent("enfants"); } catch (e) { toast(e.message); }
     }));
     $$("[data-reset]").forEach((b) => b.addEventListener("click", async () => {
       const p = S.profiles.find((x) => x.id === +b.dataset.reset);
       if (!confirm(`Effacer toute la progression de ${p.name} ?`)) return;
-      try { await api(`profiles/${p.id}/reset`, { method: "POST", body: { pin: await askPin() } }); await refreshState(); toast("Progression effacée"); } catch (e) { toast(e.message); }
+      try { await api(`profiles/${p.id}/reset`, { method: "POST", body: {} }); if (S.profile?.id === p.id) await refreshState(); toast("Progression effacée"); } catch (e) { toast(e.message); }
     }));
+  }
+  async function viewParentSettings() {
+    const st = await api("status");
+    const theme = store.get("theme", "auto");
+    const nq = Object.keys(S.Q).length, nc = Object.values(S.Q).filter((q) => q.corr && q.corr.length).length;
+    render(parentShell("reglages", `<div class="grid g2">
+        <div class="card stack"><h2>Réglages</h2>
+          <div><div class="small muted" style="margin-bottom:6px">Thème</div><div class="seg-ctl" id="theme">${[["auto", "Automatique"], ["light", "Clair"], ["dark", "Sombre"]].map(([k, l]) => `<button data-t="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
+          <div><div class="small muted" style="margin-bottom:6px">Code parent — protège l'espace Parents (progrès, fichiers, enfants, réglages)</div>
+            <button class="btn" id="setpin">🔑 Changer le code parent</button></div>
+        </div>
+        <div class="card stack"><h2>Épreuves chargées</h2>
+          <p class="small">${S.years.length} années · ${nq} questions · ${nc} avec correction ciblée (${pct(nc, nq)}%). Construit le ${esc(S.catalog.built)}.</p>
+          <p class="small muted">${st.pdfs.length} fichiers PDF disponibles.</p>
+          <div class="row"><a class="btn primary" href="#/parent/fichiers">📤 Gérer les fichiers CEB</a><button class="btn" id="rebuild">🔄 Relancer l'analyse</button>${st.building ? `<span class="chip">analyse en cours…</span>` : ""}</div></div>
+        <div class="card stack"><h2>Conseils</h2>
+          <ul class="small" style="margin:0;padding-left:18px">
+            <li>Les questions viennent des épreuves officielles du CEB (Fédération Wallonie-Bruxelles). L'enfant répond à l'écran (ou sur papier) ; les cases sont corrigées automatiquement quand c'est possible, le reste se compare à la correction officielle.</li>
+            <li>Chaque enfant a son code secret (4 à 6 chiffres). En cas d'oubli : onglet Enfants → « Réinitialiser le code ».</li>
+            <li>L'espace Parents se verrouille automatiquement après quelques heures, au rechargement de la page ou avec le bouton « Verrouiller ».</li>
+            <li>Pour « Écouter », la lecture se fait par la voix de synthèse de l'appareil ; un adulte peut aussi lire le texte affiché.</li>
+            <li>Les données restent sur ton serveur local (aucun compte, aucun envoi externe).</li></ul></div>
+      </div>`), true);
+    bindShell();
     $$("#theme button").forEach((b) => b.addEventListener("click", () => { store.set("theme", b.dataset.t); applyTheme(); $$("#theme button").forEach((x) => x.classList.toggle("on", x === b)); }));
-    $("#setpin").addEventListener("click", async () => { try { await api("settings", { method: "PUT", body: { pin: await askPin(), new_pin: $("#newpin").value } }); toast("Code enregistré"); viewParent(); } catch (e) { toast(e.message); } });
-    $("#clrpin")?.addEventListener("click", async () => { try { await api("settings", { method: "PUT", body: { pin: await askPin(), new_pin: "" } }); toast("Code retiré"); viewParent(); } catch (e) { toast(e.message); } });
-    $("#rebuild").addEventListener("click", async () => { try { await api("rebuild", { method: "POST", body: { pin: await askPin() } }); toast("Reconstruction lancée"); setTimeout(viewParent, 1500); } catch (e) { toast(e.message); } });
+    $("#setpin").addEventListener("click", async () => {
+      const a = await askCode({ title: "Nouveau code parent", subtitle: "4 à 8 chiffres", avatar: "👨‍👩‍👧", maxLen: 8 }); if (a === null) return;
+      const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", maxLen: 8 }); if (b === null) return;
+      if (a !== b) return toast("Les deux codes sont différents");
+      try { await api("settings", { method: "PUT", body: { new_pin: a } }); toast("Code parent modifié"); } catch (e) { toast(e.message); }
+    });
+    $("#rebuild").addEventListener("click", async () => { try { await api("rebuild", { method: "POST", body: {} }); toast("Analyse lancée"); location.hash = "#/parent/fichiers"; } catch (e) { toast(e.message); } });
   }
   function applyTheme() { const t = store.get("theme", "auto"); if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
 
@@ -1052,8 +1112,9 @@
     window.speechSynthesis?.cancel();
     const h = location.hash.replace(/^#\/?/, ""); const [r, a, b] = h.split("/");
     $$("#nav a").forEach((x) => x.classList.toggle("active", x.dataset.r === (r || "home") || (r === "livret" && x.dataset.r === "epreuves") || (r === "exercice" && x.dataset.r === "exercices")));
-    if (r === "parent") return viewParent();
-    if (r === "fichiers") return viewFiles();
+    if (r === "parent") return viewParent(a || "progres", b);
+    if (r === "fichiers") { location.hash = "#/parent/fichiers"; return; }
+    if (r === "progres") { location.hash = "#/parent/progres"; return; }
     if (r === "profils") return viewProfiles();
     if (!S.profile) return viewProfiles();
     switch (r || "") {
@@ -1068,7 +1129,6 @@
       case "examen": return a ? viewExamRun(a, b) : viewExamSetup();
       case "exercices": return viewDrills();
       case "exercice": return viewDrill(a);
-      case "progres": return viewProgress();
       default: return notFound();
     }
   }
@@ -1093,7 +1153,19 @@
 
   async function boot() {
     applyTheme();
-    $("#who").addEventListener("click", () => { location.hash = "#/profils"; });
+    $("#who").addEventListener("click", () => {
+      if (!S.profile) { location.hash = "#/profils"; return; }
+      const bg = document.createElement("div"); bg.className = "modal-bg";
+      bg.innerHTML = `<div class="card modal stack" style="width:min(340px,100%)"><div class="row"><span class="avatar big" style="background:${esc(S.profile.color)}33">${esc(S.profile.avatar)}</span><h2 style="margin:0">${esc(S.profile.name)}</h2></div>
+        <button class="btn" data-m="code">🔑 Changer mon code</button><button class="btn" data-m="switch">🚪 Changer d'enfant</button><button class="btn ghost" data-m="x">Fermer</button></div>`;
+      document.body.appendChild(bg);
+      bg.addEventListener("click", async (e) => {
+        const m = e.target.closest("[data-m]")?.dataset.m;
+        if (e.target === bg || m) bg.remove();
+        if (m === "code") changeMyCode();
+        if (m === "switch") { await logoutCurrent(); location.hash = "#/profils"; route(); }
+      });
+    });
     app().addEventListener("click", (e) => { if (S.sessionActive) sessionClick(e); });
     const cat = await waitCatalog();
     indexCatalog(cat);

@@ -18,9 +18,9 @@ Les enfants travaillent **question par question** sur les vraies épreuves, comp
 | 📤 **Fichiers CEB** | Téléversement des PDF d'une nouvelle année depuis le navigateur, détection automatique des livrets et des sections de correction, réglage fin des plages de pages si nécessaire, analyse incrémentale (les années inchangées sont reprises du cache). |
 | 🎧 **Écouter** | Le texte lu par l'enseignant est extrait de la correction et lu par la synthèse vocale de l'appareil (vitesse réglable, résumés de la dernière question). |
 | ⚡ **Exercices rapides** | Séries générées à l'infini avec correction immédiate : tables, calcul mental, ×/: par 10-100-1 000, fractions et pourcentages, arrondis, décimaux, conversions, durées, périmètres et aires, conjugaison, homophones. 3 niveaux. |
-| 📈 **Progrès** | Par enfant : réussite par discipline et compétence, carte d'activité, historique des examens, export CSV. |
+| 🔒 **Espace Parents** | Accès par **code parent** (demandé à chaque entrée, verrouillage manuel ou après 4 h, créé au premier accès). Regroupe : **📈 Progrès** de chaque enfant (réussite par discipline et compétence, carte d'activité, examens blancs, simulation du CEB, exercices, export CSV), **📤 Fichiers CEB** (téléversement, analyse, réglage fin), **👨‍👩‍👧 Enfants** (ajout, modification, réinitialisation du code, remise à zéro, suppression) et **⚙️ Réglages**. |
 | 👨‍👩‍👧 **Multi-enfants** | Un profil par enfant protégé par un **code secret** (4 à 6 chiffres, pavé numérique adapté aux enfants), choisi à la création du profil. L'enfant peut changer son code ; en cas d'oubli, un parent le **réinitialise** (code parent requis) et l'enfant en choisit un nouveau à sa prochaine connexion. 5 erreurs de suite bloquent le profil 30 s, puis plus longtemps. |
-| 🔑 **Code parent** | Protège l'ajout d'un enfant, la suppression, la remise à zéro de la progression et la réinitialisation des codes enfants ; permet aussi d'ouvrir l'export CSV de n'importe quel enfant. |
+| 🔑 **Code parent** | Obligatoire : il est créé au premier accès à l'espace Parents (ou au premier ajout d'enfant) et protège tout ce qui relève des parents, côté interface **et** côté serveur (téléversement, analyse, profils, codes enfants, progression des enfants). |
 | 📱 **Tablette** | Interface responsive, mode sombre, installable sur l'écran d'accueil, impression d'une question. |
 
 Aucune donnée ne quitte votre réseau : pas de compte, pas de service externe.
@@ -53,11 +53,11 @@ La casse et un `_` final sont tolérés (`2025_CEB_Questionnaire.pdf`, `2021_CEB
 
 ### Ajouter une nouvelle année
 
-**Depuis le site** : menu **📤 Fichiers** → choisir l'année et les trois PDF → *Envoyer et analyser*. Les fichiers sont stockés dans le volume de données (`/data/pdf`), le dossier `pdf/` peut donc rester en lecture seule.
+**Depuis le site** : **🔒 Parents → 📤 Fichiers CEB** → choisir l'année et les trois PDF → *Envoyer et analyser*. Les fichiers sont stockés dans le volume de données (`/data/pdf`), le dossier `pdf/` peut donc rester en lecture seule.
 
 **Ou à la main** : déposer les PDF dans `pdf/` puis *Relancer l'analyse* (ou redémarrer le conteneur).
 
-Tout est détecté automatiquement : livrets, questions, points, sections de correction de chaque livret (les correctifs suivent l'ordre des livrets ; validé sur 2021-2025, identique aux réglages manuels à une page d'annexe près), texte « Écouter », cases et lignes de réponse, clé des cases. Si une correction ne tombe pas en face de la bonne question, la page **Fichiers → Réglage fin** permet d'ajuster les plages de pages (enregistré dans `/data/years.local.json`). Les réglages de référence des années fournies sont dans [`builder/years.json`](builder/years.json).
+Tout est détecté automatiquement : livrets, questions, points, sections de correction de chaque livret (les correctifs suivent l'ordre des livrets ; validé sur 2021-2025, identique aux réglages manuels à une page d'annexe près), texte « Écouter », cases et lignes de réponse, clé des cases. Si une correction ne tombe pas en face de la bonne question, la page **Parents → Fichiers CEB → Réglage fin** permet d'ajuster les plages de pages (enregistré dans `/data/years.local.json`). Les réglages de référence des années fournies sont dans [`builder/years.json`](builder/years.json).
 
 ## Architecture
 
@@ -89,14 +89,15 @@ pdf/                PDF officiels (non versionnés)
 | GET | `/api/status` | état de la construction du catalogue |
 | GET | `/api/catalog` | années, livrets, questions et zones |
 | GET/POST | `/api/profiles` | profils enfants |
+| POST | `/api/parent/setup` · `/login` · `/check` · `/logout` | création du code parent (une seule fois) · session parent → jeton `X-Parent-Token` (4 h) |
 | POST | `/api/profiles/{id}/login` | code de l'enfant → jeton de session (en-tête `X-Profile-Token` pour les routes du profil) |
 | POST | `/api/profiles/{id}/setcode` · `/logout` | changer son code · se déconnecter |
-| POST | `/api/profiles/{id}/resetcode` | réinitialisation du code par un parent (`pin` requis) |
-| GET | `/api/profiles/{id}/state` | essais, examens, exercices, marque-pages (jeton requis) |
+| POST | `/api/profiles/{id}/resetcode` | réinitialisation du code par un parent (session parent requise) |
+| GET | `/api/profiles/{id}/state` | essais, examens, exercices, marque-pages (jeton de l'enfant ou session parent) |
 | POST | `/api/profiles/{id}/attempts` · `/exams` · `/drills` | enregistrement |
 | GET | `/api/profiles/{id}/export` | export CSV |
 | PUT | `/api/profiles/{id}/answers` | réponses saisies à l'écran |
-| POST | `/api/upload?year=AAAA&kind=questionnaire\|correction\|portfolio` | téléversement (corps = PDF, en-tête `X-Pin` si code parent) |
+| POST | `/api/upload?year=AAAA&kind=questionnaire\|correction\|portfolio` | téléversement (corps = PDF, session parent requise) |
 | DELETE | `/api/uploads/{fichier}` | suppression d'un fichier téléversé |
 | GET/PUT | `/api/yearconfig/{année}` | réglage fin d'une année |
 | POST | `/api/rebuild` | relance de l'analyse (années inchangées reprises du cache) |
@@ -118,7 +119,7 @@ CEB_PDF_DIR=./pdf CEB_DATA_DIR=./data PORT=8080 python3 app/server.py
 
 ## Sécurité
 
-Le site est prévu pour un réseau domestique (HTTP, sans compte). Les codes enfants et le code parent sont stockés hachés (PBKDF2 / SHA-256) ; les codes enfants servent à séparer les profils entre frères et sœurs, pas à protéger le site contre un attaquant du réseau. Pour un accès depuis l'extérieur, placer le site derrière un reverse proxy avec HTTPS et authentification (ou un VPN). Les profils créés avant l'ajout des codes demandent à l'enfant de créer son code à la première connexion.
+Le site est prévu pour un réseau domestique (HTTP, sans compte). Les codes enfants et le code parent sont stockés hachés (PBKDF2 / SHA-256) ; 5 erreurs de suite bloquent temporairement la saisie (enfant ou parent) ; la session parent n'est gardée qu'en mémoire du navigateur (verrouillée au rechargement de la page) ; les codes enfants servent à séparer les profils entre frères et sœurs, pas à protéger le site contre un attaquant du réseau. Pour un accès depuis l'extérieur, placer le site derrière un reverse proxy avec HTTPS et authentification (ou un VPN). Les profils créés avant l'ajout des codes demandent à l'enfant de créer son code à la première connexion.
 
 ## Droits
 

@@ -197,11 +197,19 @@ def new_token(pid):
     return tok
 
 
+PARENT_HOURS = float(os.environ.get("CEB_PARENT_HOURS", "4"))
+
+
 def token_profile(tok):
+    """Profil associé à un jeton (0 = session parent), ou None si invalide/expiré."""
     if not tok:
         return None
     r = rows("SELECT profile, created FROM tokens WHERE token=?", (tok,))
-    if not r or time.time() - r[0]["created"] > TOKEN_DAYS * 86400:
+    if not r:
+        return None
+    ttl = PARENT_HOURS * 3600 if r[0]["profile"] == 0 else TOKEN_DAYS * 86400
+    if time.time() - r[0]["created"] > ttl:
+        execute("DELETE FROM tokens WHERE token=?", (tok,))
         return None
     return r[0]["profile"]
 
@@ -272,14 +280,20 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
-    def check_pin(self, data):
+    def parent_ok(self, data=None):
+        """Session parent valide (jeton) ou code parent correct (le code doit exister)."""
+        tok = self.headers.get("X-Parent-Token") or (getattr(self, "_qs", {}).get("ptoken") or [""])[0]
+        if tok and token_profile(tok) == 0:
+            return True
         h = get_setting("pin")
-        return not h or pin_hash(data.get("pin", "")) == h
+        return bool(h) and bool(data) and pin_hash(str(data.get("pin", ""))) == h
+
+    def check_pin(self, data):
+        """Souple : accepté aussi tant qu'aucun code parent n'est défini (premier démarrage)."""
+        return not get_setting("pin") or self.parent_ok(data)
 
     def strict_pin(self, data):
-        """Code parent obligatoire (doit exister et être correct)."""
-        h = get_setting("pin")
-        return bool(h) and pin_hash(data.get("pin", "")) == h
+        return self.parent_ok(data)
 
     def profile_token(self, qs=None):
         tok = self.headers.get("X-Profile-Token") or ""
@@ -342,8 +356,8 @@ class Handler(BaseHTTPRequestHandler):
         year = (qs.get("year") or [""])[0]
         kind = KINDS.get((qs.get("kind") or [""])[0])
         n = int(self.headers.get("Content-Length") or 0)
-        h = get_setting("pin")
-        if h and pin_hash(self.headers.get("X-Pin", "")) != h:
+        self._qs = qs
+        if not self.parent_ok({"pin": self.headers.get("X-Pin", "")}):
             self.rfile.read(n)
             return self.error(403, "code parent incorrect")
         if not re.fullmatch(r"20\d\d", year) or not kind:
@@ -378,6 +392,37 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, method, path, data, qs):
         parts = path.split("/")[2:]  # après /api
         head = parts[0] if parts else ""
+        self._qs = qs
+
+        if head == "parent" and len(parts) == 2 and method == "POST":
+            act = parts[1]
+            if act == "setup":  # création du code parent (uniquement s'il n'existe pas)
+                if get_setting("pin"):
+                    return self.error(409, "un code parent existe déjà")
+                np_ = str(data.get("new_pin") or "")
+                if not re.fullmatch(r"\d{4,8}", np_):
+                    return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                set_setting("pin", pin_hash(np_))
+                return self.send_json({"token": new_token(0)})
+            if act == "login":
+                if not get_setting("pin"):
+                    return self.error(412, "aucun code parent défini")
+                n, until = _fails.get("parent", (0, 0))
+                if until > time.time():
+                    return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
+                if self.parent_ok({"pin": data.get("pin", "")}):
+                    _fails.pop("parent", None)
+                    return self.send_json({"token": new_token(0), "hours": PARENT_HOURS})
+                n += 1
+                _fails["parent"] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
+                return self.error(403, "code parent incorrect")
+            if act == "logout":
+                tok = self.headers.get("X-Parent-Token", "")
+                if tok:
+                    execute("DELETE FROM tokens WHERE token=? AND profile=0", (tok,))
+                return self.send_json({"ok": True})
+            if act == "check":
+                return self.send_json({"ok": self.parent_ok()})
 
         if head == "status" and method == "GET":
             cat = os.path.exists(CATALOG)
@@ -403,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data_)
             return
         if head == "rebuild" and method == "POST":
-            if not self.check_pin(data):
+            if not self.strict_pin(data):
                 return self.error(403, "code parent incorrect")
             return self.send_json({"started": run_build(force=True)})
 
@@ -423,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
                     set_setting("prefs", json.dumps(data["prefs"]))
                 return self.send_json({"ok": True})
         if head == "uploads" and method == "DELETE" and len(parts) == 2:
-            if not self.check_pin(data):
+            if not self.strict_pin(data):
                 return self.error(403, "code parent incorrect")
             name = os.path.basename(parts[1])
             p = os.path.join(UPLOAD_DIR, name)
@@ -439,7 +484,7 @@ class Handler(BaseHTTPRequestHandler):
                 base = json.load(open(os.path.join(ROOT, "builder", "years.json"))).get(y, {})
                 return self.send_json({"base": base, "local": local.get(y, {})})
             if method == "PUT":
-                if not self.check_pin(data):
+                if not self.strict_pin(data):
                     return self.error(403, "code parent incorrect")
                 cfg = data.get("config")
                 if cfg is None:
@@ -503,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
                 _fails.pop(pid, None)
                 return self.send_json({"ok": True})
             parent_only = (sub == "" and method == "DELETE") or (sub == "reset" and method == "POST")
-            authed = token_profile(self.profile_token(qs)) == pid
+            authed = token_profile(self.profile_token(qs)) == pid or self.parent_ok()
             parent_edit = sub == "" and method == "PUT" and "pin" in data and self.check_pin(data)
             if not (parent_only or authed or parent_edit or ("pin" in data and self.strict_pin(data))):
                 return self.error(401, "code de l'enfant requis")
@@ -523,14 +568,14 @@ class Handler(BaseHTTPRequestHandler):
                         (data.get("name"), data.get("avatar"), data.get("color"), pid))
                 return self.send_json(public_profile(pid))
             if sub == "" and method == "DELETE":
-                if not self.check_pin(data):
+                if not self.strict_pin(data):
                     return self.error(403, "code parent incorrect")
                 for t in ("attempts", "exams", "drills", "notes", "answers", "tokens"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
                 execute("DELETE FROM profiles WHERE id=?", (pid,))
                 return self.send_json({"ok": True})
             if sub == "reset" and method == "POST":
-                if not self.check_pin(data):
+                if not self.strict_pin(data):
                     return self.error(403, "code parent incorrect")
                 for t in ("attempts", "exams", "drills", "notes", "answers"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
