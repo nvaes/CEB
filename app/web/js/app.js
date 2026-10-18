@@ -26,6 +26,7 @@
     const tok = store.get("token", null);
     if (tok && /^profiles\/\d+/.test(path)) headers["X-Profile-Token"] = tok;
     if (S.ptoken) headers["X-Parent-Token"] = S.ptoken;
+    const fkey = store.get("familyKey", null); if (fkey) headers["X-Family-Key"] = fkey;
     const res = await fetch("/api/" + path, { method: opts.method || "GET", headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
     const data = await res.json().catch(() => ({}));
     if (res.status === 403 && S.ptoken && /code parent/.test(data.error || "")) { S.ptoken = null; }  // session parent expirée
@@ -298,13 +299,32 @@
   /* ================================================================ profils */
   const AVATARS = ["🦊", "🐼", "🐯", "🦁", "🐸", "🐙", "🦄", "🐧", "🐨", "🐵", "🐶", "🐱", "🦖", "🚀", "⚽", "🎸"];
   const COLORS = ["#4f6df5", "#e0583a", "#2f9e5b", "#e7a23a", "#9b59b6", "#16a2b8", "#d63384"];
+  async function bindDevice() {
+    if (!(await parentGate("Associer cette tablette à ta famille."))) return false;
+    const r = await api("family/bind", { method: "POST", body: { label: navigator.userAgent.slice(0, 60) } });
+    await logoutCurrent();
+    store.set("familyKey", r.key); S.family = r.family; await loadProfiles();
+    if (!location.hash.startsWith("#/parent")) { api("parent/logout", { method: "POST", body: {} }).catch(() => {}); S.ptoken = null; S.parent = null; }
+    toast(`Tablette associée à la famille ${r.family.name} 👪`);
+    return true;
+  }
   function viewProfiles() {
-    render(`<h1>Qui révise aujourd'hui ?</h1><p class="muted">Chaque enfant a sa propre progression.</p>
+    if (!S.family) {
+      render(`<div class="card stack" style="max-width:620px;margin:30px auto;text-align:center">
+        <div class="celebrate">👪</div><h1>Bienvenue !</h1>
+        <p class="muted">Cette tablette n'est associée à aucune famille. Un parent l'associe une seule fois avec son code parent : seuls ses enfants apparaîtront ensuite ici.</p>
+        <div><button class="btn primary big" id="bind">Associer à ma famille</button></div>
+        <p class="tiny">Premier démarrage du site ? Le premier code parent créé devient le compte administrateur (gestion des fichiers CEB et des familles).</p></div>`);
+      $("#bind").addEventListener("click", async () => { if (await bindDevice()) viewProfiles(); });
+      return;
+    }
+    render(`<div class="spread"><h1 style="margin:0">Qui révise aujourd'hui ?</h1><span class="chip">👪 Famille ${esc(S.family.name)}</span></div><p class="muted">Chaque enfant a sa propre progression.</p>
       <div class="profiles" style="margin-top:18px">
         ${S.profiles.map((p) => `<button class="profile-card" data-id="${p.id}"><span class="avatar big" style="background:${esc(p.color)}33">${esc(p.avatar)}</span>${esc(p.name)}</button>`).join("")}
         <button class="profile-card" data-new="1" style="border-style:dashed"><span class="avatar big">＋</span>Ajouter</button>
       </div>
-      <p class="tiny" style="margin-top:28px">🔒 Chaque enfant entre son code secret. Code oublié ? Un parent peut le réinitialiser dans l'<a href="#/parent/enfants">espace Parents</a>.</p>`);
+      <p class="tiny" style="margin-top:28px">🔒 Chaque enfant entre son code secret. Code oublié ? Un parent peut le réinitialiser dans l'<a href="#/parent/enfants">espace Parents</a>. · <a href="#" id="rebind">Associer cette tablette à une autre famille</a></p>`);
+    $("#rebind").addEventListener("click", async (e) => { e.preventDefault(); S.ptoken = null; if (await bindDevice()) viewProfiles(); });
     $$("[data-id]").forEach((b) => b.addEventListener("click", () => loginProfile(+b.dataset.id)));
     $("[data-new]").addEventListener("click", () => editProfile());
   }
@@ -390,6 +410,7 @@
     const bg = document.createElement("div"); bg.className = "modal-bg";
     bg.innerHTML = `<div class="card modal stack"><h2>${p ? "Modifier le profil" : "Nouveau profil"}</h2>
       <label class="stack"><span class="small muted">Prénom</span><input type="text" id="pname" maxlength="40" value="${esc(p?.name || "")}" autofocus></label>
+      ${!p && isAdmin() && location.hash.startsWith("#/parent") && (S.families || []).length > 1 ? `<label class="stack"><span class="small muted">Famille</span><select id="pfam">${S.families.map((f) => `<option value="${f.id}" ${f.id === S.parent.id ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select></label>` : ""}
       <div><div class="small muted" style="margin-bottom:6px">Avatar</div><div class="emoji-pick">${AVATARS.map((a) => `<button data-av="${a}" class="${a === avatar ? "on" : ""}">${a}</button>`).join("")}</div></div>
       <div><div class="small muted" style="margin-bottom:6px">Couleur</div><div class="emoji-pick">${COLORS.map((c) => `<button data-col="${c}" class="${c === color ? "on" : ""}" style="background:${c}"></button>`).join("")}</div></div>
       <div class="row" style="justify-content:flex-end"><button class="btn ghost" data-x>Annuler</button><button class="btn primary" data-ok>Enregistrer</button></div></div>`;
@@ -401,6 +422,7 @@
       if (t.dataset.col) { color = t.dataset.col; $$("[data-col]", bg).forEach((b) => b.classList.toggle("on", b === t)); }
       if (t.closest("[data-ok]")) {
         const name = $("#pname", bg).value.trim(); if (!name) return $("#pname", bg).focus();
+        const family = $("#pfam", bg) ? +$("#pfam", bg).value : (location.hash.startsWith("#/parent") ? undefined : S.family?.id);
         try {
           if (p) {
             const body = { name, avatar, color };
@@ -413,7 +435,10 @@
           const pin = "";
           const code = await chooseNewCode({ avatar }, `Code secret de ${name}`);
           if (code === null) return toast("Profil non créé : un code est obligatoire");
-          const res = await api("profiles", { method: "POST", body: { name, avatar, color, code, pin } });
+          const res = await api("profiles", { method: "POST", body: { name, avatar, color, code, pin, family } });
+          if (!location.hash.startsWith("#/parent") && S.family && S.parent && !isAdmin() && S.parent.id !== S.family.id) {
+            toast(`${name} a été ajouté à la famille ${S.parent.name}, pas à celle de cette tablette.`, 4000); await loadProfiles(); return viewProfiles();
+          }
           if (location.hash.startsWith("#/parent")) {  // ajout depuis l'espace Parents : on y reste
             toast(`Profil de ${name} créé 🔒`); return viewParent("enfants");
           }
@@ -989,35 +1014,36 @@
   /* --- accès parent : code demandé à chaque entrée (session de quelques heures, en mémoire seulement) */
   async function parentGate(reason = "") {
     if (S.ptoken) {
-      try { const r = await api("parent/check", { method: "POST", body: {} }); if (r.ok) return true; } catch (e) { /* */ }
+      try { const r = await api("parent/check", { method: "POST", body: {} }); if (r.ok) { S.parent = r.parent; return true; } } catch (e) { /* */ }
       S.ptoken = null;
     }
     const st = await api("settings");
     if (!st.pin) {
       // premier accès : création obligatoire du code parent
       for (let err = ""; ;) {
-        const a = await askCode({ title: "Crée le code parent", subtitle: (reason ? reason + " " : "") + "4 à 8 chiffres, à ne pas communiquer aux enfants.", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
+        const a = await askCode({ title: "Crée le code administrateur", subtitle: (reason ? reason + " " : "") + "Premier compte parent : il gère les fichiers CEB et les familles. 4 à 8 chiffres.", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
         if (a === null) return false;
         const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", maxLen: 8 });
         if (b === null) return false;
         if (a !== b) { err = "Les deux codes sont différents."; continue; }
-        try { const r = await api("parent/setup", { method: "POST", body: { new_pin: a } }); S.ptoken = r.token; toast("Code parent créé 🔒"); return true; } catch (e) { err = e.message; }
+        try { const r = await api("parent/setup", { method: "POST", body: { new_pin: a } }); S.ptoken = r.token; S.parent = r.parent; toast("Code administrateur créé 🔒"); return true; } catch (e) { err = e.message; }
       }
     }
     for (let err = ""; ;) {
       const pin = await askCode({ title: "Espace Parents", subtitle: reason || "Entre le code parent", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
       if (pin === null) return false;
-      try { const r = await api("parent/login", { method: "POST", body: { pin } }); S.ptoken = r.token; return true; } catch (e) { err = e.message; }
+      try { const r = await api("parent/login", { method: "POST", body: { pin } }); S.ptoken = r.token; S.parent = r.parent; return true; } catch (e) { err = e.message; }
     }
   }
   async function parentLock() {
     if (S.ptoken) await api("parent/logout", { method: "POST", body: {} }).catch(() => {});
-    S.ptoken = null; location.hash = S.profile ? "#/" : "#/profils";
+    S.ptoken = null; S.parent = null; location.hash = S.profile ? "#/" : "#/profils";
   }
-  const PARENT_TABS = [["progres", "📈 Progrès"], ["fichiers", "📤 Fichiers CEB"], ["enfants", "👨‍👩‍👧 Enfants"], ["reglages", "⚙️ Réglages"]];
+  const PARENT_TABS = [["progres", "📈 Progrès"], ["enfants", "👨‍👩‍👧 Enfants"], ["fichiers", "📤 Fichiers CEB", "admin"], ["familles", "👪 Familles", "admin"], ["reglages", "⚙️ Réglages"]];
+  const isAdmin = () => S.parent && S.parent.role === "admin";
   function parentShell(tab, inner) {
-    return `<div class="spread"><h1 style="margin:0">Espace Parents</h1><button class="btn sm" data-plock>🔒 Verrouiller</button></div>
-      <div class="seg-ctl" style="margin:12px 0 18px">${PARENT_TABS.map(([k, l]) => `<button data-ptab="${k}" class="${k === tab ? "on" : ""}">${l}</button>`).join("")}</div>${inner}`;
+    return `<div class="spread"><div><h1 style="margin:0">Espace Parents</h1><div class="small muted">👪 ${esc(S.parent?.name || "")}${isAdmin() ? " · administrateur" : ""}</div></div><button class="btn sm" data-plock>🔒 Verrouiller</button></div>
+      <div class="seg-ctl" style="margin:12px 0 18px">${PARENT_TABS.filter((t) => !t[2] || isAdmin()).map(([k, l]) => `<button data-ptab="${k}" class="${k === tab ? "on" : ""}">${l}</button>`).join("")}</div>${inner}`;
   }
   function bindShell() {
     $$("[data-ptab]").forEach((b) => b.addEventListener("click", () => { location.hash = `#/parent/${b.dataset.ptab}`; }));
@@ -1025,49 +1051,86 @@
   }
   async function viewParent(tab = "progres", arg) {
     if (!(await parentGate())) { location.hash = S.profile ? "#/" : "#/profils"; return; }
-    await loadProfiles();
-    if (tab === "fichiers") return viewFiles();
+    S.pchildren = await api("parent/children");
+    if (isAdmin()) S.families = await api("parents"); else S.families = [S.parent];
+    if (tab === "fichiers" && isAdmin()) return viewFiles();
+    if (tab === "familles" && isAdmin()) return viewParentFamilies();
     if (tab === "enfants") return viewParentChildren();
     if (tab === "reglages") return viewParentSettings();
     return viewParentProgress(arg);
   }
   async function viewParentProgress(childId) {
-    if (!S.profiles.length) { render(parentShell("progres", `<div class="card empty">Aucun enfant pour l'instant. <a href="#/parent/enfants">Ajouter un enfant</a></div>`), true); return bindShell(); }
-    const child = S.profiles.find((p) => p.id === +childId) || S.profiles[0];
+    const kids = S.pchildren;
+    if (!kids.length) { render(parentShell("progres", `<div class="card empty">Aucun enfant pour l'instant. <a href="#/parent/enfants">Ajouter un enfant</a></div>`), true); return bindShell(); }
+    const child = kids.find((p) => p.id === +childId) || kids[0];
     const state = await api(`profiles/${child.id}/state`);
     // calcule les statistiques avec l'état de cet enfant, puis restaure l'état de la session en cours
     const saved = { profile: S.profile, state: S.state, last: S.last, hist: S.hist, flags: S.flags };
     S.profile = child; S.state = state; derive();
     let html;
     try { html = progressHTML(child); } finally { Object.assign(S, saved); }
-    const overview = S.profiles.map((p) => `<button class="btn sm ${p.id === child.id ? "primary" : ""}" data-child="${p.id}"><span>${esc(p.avatar)}</span> ${esc(p.name)}</button>`).join("");
+    const fams = [...new Set(kids.map((k) => k.family_name || ""))];
+    const overview = fams.map((f) => `${isAdmin() && fams.length > 1 ? `<span class="tiny" style="margin-left:6px">${esc(f)} :</span>` : ""}${kids.filter((k) => (k.family_name || "") === f).map((p) => `<button class="btn sm ${p.id === child.id ? "primary" : ""}" data-child="${p.id}"><span>${esc(p.avatar)}</span> ${esc(p.name)}</button>`).join("")}`).join("");
     render(parentShell("progres", `<div class="row" style="margin-bottom:14px">${overview}</div>${html}`), true);
     bindShell();
     $$("[data-child]").forEach((b) => b.addEventListener("click", () => { location.hash = `#/parent/progres/${b.dataset.child}`; }));
   }
   async function viewParentChildren() {
     render(parentShell("enfants", `<div class="card stack" style="max-width:860px"><h2>Enfants</h2>
-      ${S.profiles.map((p) => `<div class="spread" style="border-bottom:1px solid var(--line);padding-bottom:10px"><div class="row"><span class="avatar" style="background:${esc(p.color)}33">${esc(p.avatar)}</span><b>${esc(p.name)}</b><span class="tiny">${p.has_code ? "🔒 code défini" : "⚠️ code à créer à la prochaine connexion"}</span></div>
+      ${S.pchildren.map((p) => `<div class="spread" style="border-bottom:1px solid var(--line);padding-bottom:10px"><div class="row"><span class="avatar" style="background:${esc(p.color)}33">${esc(p.avatar)}</span><b>${esc(p.name)}</b>${isAdmin() ? `<span class="chip">${esc(p.family_name || "")}</span>` : ""}<span class="tiny">${p.has_code ? "🔒 code défini" : "⚠️ code à créer à la prochaine connexion"}</span></div>
         <div class="row"><button class="btn sm" data-edit="${p.id}">Modifier</button><button class="btn sm" data-rcode="${p.id}" title="L'enfant choisira un nouveau code à sa prochaine connexion">🔑 Réinitialiser le code</button><button class="btn sm" data-reset="${p.id}">Remettre à zéro</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></div></div>`).join("") || `<p class="muted">Aucun profil.</p>`}
       <div><button class="btn primary" id="add">＋ Ajouter un enfant</button></div>
       <p class="tiny" style="margin:0">« Réinitialiser le code » efface le code de l'enfant et le déconnecte de tous les appareils : il choisira un nouveau code à sa prochaine connexion.</p></div>`), true);
     bindShell();
     $("#add").addEventListener("click", () => editProfile());
-    $$("[data-edit]").forEach((b) => b.addEventListener("click", () => editProfile(S.profiles.find((p) => p.id === +b.dataset.edit))));
+    $$("[data-edit]").forEach((b) => b.addEventListener("click", () => editProfile(S.pchildren.find((p) => p.id === +b.dataset.edit))));
     $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {
-      const p = S.profiles.find((x) => x.id === +b.dataset.del);
+      const p = S.pchildren.find((x) => x.id === +b.dataset.del);
       if (!confirm(`Supprimer définitivement le profil de ${p.name} et toute sa progression ?`)) return;
       try { await api(`profiles/${p.id}`, { method: "DELETE", body: {} }); if (S.profile?.id === p.id) { S.profile = null; store.set("profile", null); store.set("token", null); paintWho(); } viewParent("enfants"); } catch (e) { toast(e.message); }
     }));
     $$("[data-rcode]").forEach((b) => b.addEventListener("click", async () => {
-      const p = S.profiles.find((x) => x.id === +b.dataset.rcode);
+      const p = S.pchildren.find((x) => x.id === +b.dataset.rcode);
       if (!confirm(`Réinitialiser le code de ${p.name} ?`)) return;
       try { await api(`profiles/${p.id}/resetcode`, { method: "POST", body: {}, noAuthRedirect: true }); toast(`Code de ${p.name} réinitialisé : il en choisira un nouveau à sa prochaine connexion.`, 3500); if (S.profile?.id === p.id) { store.set("token", null); S.profile = null; paintWho(); } viewParent("enfants"); } catch (e) { toast(e.message); }
     }));
     $$("[data-reset]").forEach((b) => b.addEventListener("click", async () => {
-      const p = S.profiles.find((x) => x.id === +b.dataset.reset);
+      const p = S.pchildren.find((x) => x.id === +b.dataset.reset);
       if (!confirm(`Effacer toute la progression de ${p.name} ?`)) return;
       try { await api(`profiles/${p.id}/reset`, { method: "POST", body: {} }); if (S.profile?.id === p.id) await refreshState(); toast("Progression effacée"); } catch (e) { toast(e.message); }
+    }));
+  }
+  async function viewParentFamilies() {
+    render(parentShell("familles", `<div class="card stack" style="max-width:860px"><h2>Familles</h2>
+      <p class="small muted" style="margin:0">Chaque famille a son propre code parent et ne voit que ses enfants. En tant qu'administrateur, tu vois la progression de tous les enfants et tu gères les fichiers CEB.</p>
+      ${S.families.map((f) => `<div class="spread" style="border-bottom:1px solid var(--line);padding-bottom:10px"><div class="row"><b>👪 ${esc(f.name)}</b>${f.role === "admin" ? `<span class="chip">administrateur</span>` : ""}<span class="tiny">${f.children} enfant${f.children > 1 ? "s" : ""}</span></div>
+        <div class="row"><button class="btn sm" data-fren="${f.id}">Renommer</button><button class="btn sm" data-fpin="${f.id}">🔑 Nouveau code</button>${f.role === "admin" ? "" : `<button class="btn sm danger" data-fdel="${f.id}">Supprimer</button>`}</div></div>`).join("")}
+      <div><button class="btn primary" id="addfam">＋ Ajouter une famille</button></div>
+      <p class="tiny" style="margin:0">Donne ensuite son code au parent concerné : il associe ses tablettes à sa famille (écran d'accueil → « Associer à ma famille ») et ajoute ses enfants depuis son espace Parents.</p></div>`), true);
+    bindShell();
+    const newPin = async (title) => {
+      const a = await askCode({ title, subtitle: "Code parent : 4 à 8 chiffres, différent de celui des autres familles", avatar: "👪", maxLen: 8 }); if (a === null) return null;
+      const b = await askCode({ title: "Confirme le code", subtitle: "Tape-le une deuxième fois", avatar: "👪", maxLen: 8 }); if (b === null) return null;
+      if (a !== b) { toast("Les deux codes sont différents"); return null; }
+      return a;
+    };
+    $("#addfam").addEventListener("click", async () => {
+      const name = (prompt("Nom de la famille (ex. : Dupont) :") || "").trim(); if (!name) return;
+      const pin = await newPin(`Code parent de la famille ${name}`); if (!pin) return;
+      try { await api("parents", { method: "POST", body: { name, pin } }); toast(`Famille ${name} créée`); viewParent("familles"); } catch (e) { toast(e.message, 3500); }
+    });
+    $$("[data-fren]").forEach((b) => b.addEventListener("click", async () => {
+      const f = S.families.find((x) => x.id === +b.dataset.fren); const name = (prompt("Nouveau nom :", f.name) || "").trim(); if (!name) return;
+      try { await api(`parents/${f.id}`, { method: "PUT", body: { name } }); if (f.id === S.parent.id) S.parent.name = name; viewParent("familles"); } catch (e) { toast(e.message); }
+    }));
+    $$("[data-fpin]").forEach((b) => b.addEventListener("click", async () => {
+      const f = S.families.find((x) => x.id === +b.dataset.fpin); const pin = await newPin(`Nouveau code — ${f.name}`); if (!pin) return;
+      try { await api(`parents/${f.id}`, { method: "PUT", body: { pin } }); toast(`Code de la famille ${f.name} modifié`); } catch (e) { toast(e.message, 3500); }
+    }));
+    $$("[data-fdel]").forEach((b) => b.addEventListener("click", async () => {
+      const f = S.families.find((x) => x.id === +b.dataset.fdel);
+      if (!confirm(`Supprimer la famille ${f.name} ? (ses tablettes seront dissociées)`)) return;
+      try { await api(`parents/${f.id}`, { method: "DELETE", body: {} }); viewParent("familles"); } catch (e) { toast(e.message, 3500); }
     }));
   }
   async function viewParentSettings() {
@@ -1077,13 +1140,15 @@
     render(parentShell("reglages", `<div class="grid g2">
         <div class="card stack"><h2>Réglages</h2>
           <div><div class="small muted" style="margin-bottom:6px">Thème</div><div class="seg-ctl" id="theme">${[["auto", "Automatique"], ["light", "Clair"], ["dark", "Sombre"]].map(([k, l]) => `<button data-t="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
-          <div><div class="small muted" style="margin-bottom:6px">Code parent — protège l'espace Parents (progrès, fichiers, enfants, réglages)</div>
-            <button class="btn" id="setpin">🔑 Changer le code parent</button></div>
+          <div><div class="small muted" style="margin-bottom:6px">Mon code parent (famille ${esc(S.parent.name)})</div>
+            <button class="btn" id="setpin">🔑 Changer mon code parent</button></div>
+          <div><div class="small muted" style="margin-bottom:6px">Cette tablette : ${S.family ? `famille ${esc(S.family.name)}` : "non associée"}</div>
+            <button class="btn" id="bindhere">👪 Associer cette tablette à ma famille</button></div>
         </div>
-        <div class="card stack"><h2>Épreuves chargées</h2>
+        ${isAdmin() ? `<div class="card stack"><h2>Épreuves chargées</h2>
           <p class="small">${S.years.length} années · ${nq} questions · ${nc} avec correction ciblée (${pct(nc, nq)}%). Construit le ${esc(S.catalog.built)}.</p>
           <p class="small muted">${st.pdfs.length} fichiers PDF disponibles.</p>
-          <div class="row"><a class="btn primary" href="#/parent/fichiers">📤 Gérer les fichiers CEB</a><button class="btn" id="rebuild">🔄 Relancer l'analyse</button>${st.building ? `<span class="chip">analyse en cours…</span>` : ""}</div></div>
+          <div class="row"><a class="btn primary" href="#/parent/fichiers">📤 Gérer les fichiers CEB</a><button class="btn" id="rebuild">🔄 Relancer l'analyse</button>${st.building ? `<span class="chip">analyse en cours…</span>` : ""}</div></div>` : ""}
         <div class="card stack"><h2>Conseils</h2>
           <ul class="small" style="margin:0;padding-left:18px">
             <li>Les questions viennent des épreuves officielles du CEB (Fédération Wallonie-Bruxelles). L'enfant répond à l'écran (ou sur papier) ; les cases sont corrigées automatiquement quand c'est possible, le reste se compare à la correction officielle.</li>
@@ -1100,7 +1165,12 @@
       if (a !== b) return toast("Les deux codes sont différents");
       try { await api("settings", { method: "PUT", body: { new_pin: a } }); toast("Code parent modifié"); } catch (e) { toast(e.message); }
     });
-    $("#rebuild").addEventListener("click", async () => { try { await api("rebuild", { method: "POST", body: {} }); toast("Analyse lancée"); location.hash = "#/parent/fichiers"; } catch (e) { toast(e.message); } });
+    $("#rebuild")?.addEventListener("click", async () => { try { await api("rebuild", { method: "POST", body: {} }); toast("Analyse lancée"); location.hash = "#/parent/fichiers"; } catch (e) { toast(e.message); } });
+    $("#bindhere").addEventListener("click", async () => {
+      const r = await api("family/bind", { method: "POST", body: { label: navigator.userAgent.slice(0, 60) } });
+      if (S.family?.id !== r.family.id) await logoutCurrent();
+      store.set("familyKey", r.key); S.family = r.family; await loadProfiles(); toast(`Tablette associée à la famille ${r.family.name}`); viewParent("reglages");
+    });
   }
   function applyTheme() { const t = store.get("theme", "auto"); if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
 
@@ -1111,6 +1181,10 @@
     S.sessionActive = false;
     window.speechSynthesis?.cancel();
     const h = location.hash.replace(/^#\/?/, ""); const [r, a, b] = h.split("/");
+    if (r !== "parent" && S.ptoken) {
+      // on quitte l'espace Parents : la session parent est fermée (un enfant ne doit pas pouvoir y revenir)
+      api("parent/logout", { method: "POST", body: {} }).catch(() => {}); S.ptoken = null; S.parent = null;
+    }
     $$("#nav a").forEach((x) => x.classList.toggle("active", x.dataset.r === (r || "home") || (r === "livret" && x.dataset.r === "epreuves") || (r === "exercice" && x.dataset.r === "exercices")));
     if (r === "parent") return viewParent(a || "progres", b);
     if (r === "fichiers") { location.hash = "#/parent/fichiers"; return; }
@@ -1169,6 +1243,9 @@
     app().addEventListener("click", (e) => { if (S.sessionActive) sessionClick(e); });
     const cat = await waitCatalog();
     indexCatalog(cat);
+    if (store.get("familyKey", null)) {
+      try { S.family = (await api("family/info")).family; } catch (e) { store.set("familyKey", null); S.family = null; }
+    }
     await loadProfiles();
     const pid = store.get("profile", null);
     if (pid && S.profiles.some((p) => p.id === pid)) await selectProfile(pid); else paintWho();

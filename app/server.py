@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS notes(
   profile INTEGER NOT NULL, qid TEXT NOT NULL, flag INTEGER DEFAULT 0, note TEXT,
   ts REAL, PRIMARY KEY(profile, qid));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS parents(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, pin TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'parent', created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS devices(
+  key TEXT PRIMARY KEY, parent INTEGER NOT NULL, created REAL NOT NULL, label TEXT);
 CREATE TABLE IF NOT EXISTS tokens(
   token TEXT PRIMARY KEY, profile INTEGER NOT NULL, created REAL NOT NULL, last REAL);
 CREATE TABLE IF NOT EXISTS answers(
@@ -129,6 +134,18 @@ def init_db():
         cols = [r[1] for r in con.execute("PRAGMA table_info(profiles)")]
         if "code" not in cols:  # migration : code secret par enfant
             con.execute("ALTER TABLE profiles ADD COLUMN code TEXT")
+        if "family" not in cols:  # migration : enfant rattaché à une famille (compte parent)
+            con.execute("ALTER TABLE profiles ADD COLUMN family INTEGER")
+        if "parent" not in [r[1] for r in con.execute("PRAGMA table_info(tokens)")]:
+            con.execute("ALTER TABLE tokens ADD COLUMN parent INTEGER")
+        # migration : l'ancien code parent unique devient le compte administrateur
+        if not con.execute("SELECT id FROM parents LIMIT 1").fetchone():
+            old = con.execute("SELECT value FROM settings WHERE key='pin'").fetchone()
+            if old and old[0]:
+                cur = con.execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
+                                  ("Administrateur", "sha256$" + old[0], "admin", time.time()))
+                con.execute("UPDATE profiles SET family=? WHERE family IS NULL", (cur.lastrowid,))
+                con.execute("DELETE FROM tokens WHERE profile=0")
 
 
 def rows(sql, args=()):
@@ -225,6 +242,48 @@ def pin_hash(pin):
     return hashlib.sha256(("ceb-local:" + str(pin)).encode()).hexdigest()
 
 
+# ------------------------------------------------------------------ comptes parents (familles)
+PIN_RE = re.compile(r"\d{4,8}")
+
+
+def verify_pin(pin, stored):
+    if not stored or not pin:
+        return False
+    if stored.startswith("sha256$"):  # ancien code parent (avant les familles)
+        return hmac.compare_digest(pin_hash(pin), stored[7:])
+    return code_ok(pin, stored)
+
+
+def find_parent_by_pin(pin):
+    if not pin:
+        return None
+    for p in rows("SELECT id, name, role, pin FROM parents"):
+        if verify_pin(pin, p["pin"]):
+            if p["pin"].startswith("sha256$"):  # renforce le hachage au passage
+                execute("UPDATE parents SET pin=? WHERE id=?", (code_hash(pin), p["id"]))
+            return {k: p[k] for k in ("id", "name", "role")}
+    return None
+
+
+def parent_info(pid):
+    r = rows("SELECT id, name, role FROM parents WHERE id=?", (pid,))
+    return r[0] if r else None
+
+
+def new_parent_token(parent_id):
+    tok = secrets.token_urlsafe(24)
+    execute("INSERT INTO tokens(token,profile,parent,created,last) VALUES(?,?,?,?,?)",
+            (tok, 0, parent_id, time.time(), time.time()))
+    return tok
+
+
+def token_parent(tok):
+    if not tok or token_profile(tok) != 0:
+        return None
+    r = rows("SELECT parent FROM tokens WHERE token=?", (tok,))
+    return parent_info(r[0]["parent"]) if r and r[0]["parent"] else None
+
+
 # ------------------------------------------------------------------ HTTP
 class Handler(BaseHTTPRequestHandler):
     server_version = "RevisionCEB/1.0"
@@ -280,20 +339,32 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
+    def parent(self):
+        """Compte parent de la session (jeton X-Parent-Token ou ?ptoken=), ou None."""
+        if not hasattr(self, "_parent"):
+            tok = self.headers.get("X-Parent-Token") or (getattr(self, "_qs", {}).get("ptoken") or [""])[0]
+            self._parent = token_parent(tok)
+        return self._parent
+
     def parent_ok(self, data=None):
-        """Session parent valide (jeton) ou code parent correct (le code doit exister)."""
-        tok = self.headers.get("X-Parent-Token") or (getattr(self, "_qs", {}).get("ptoken") or [""])[0]
-        if tok and token_profile(tok) == 0:
-            return True
-        h = get_setting("pin")
-        return bool(h) and bool(data) and pin_hash(str(data.get("pin", ""))) == h
+        """Session parent, ou code parent fourni dans la requête (compatibilité)."""
+        return self.parent() or (find_parent_by_pin(str(data.get("pin") or "")) if data else None)
 
-    def check_pin(self, data):
-        """Souple : accepté aussi tant qu'aucun code parent n'est défini (premier démarrage)."""
-        return not get_setting("pin") or self.parent_ok(data)
+    def is_admin(self, data=None):
+        p = self.parent_ok(data)
+        return bool(p) and p["role"] == "admin"
 
-    def strict_pin(self, data):
-        return self.parent_ok(data)
+    def can_access(self, prof):
+        """Un parent ne voit que les enfants de sa famille ; l'administrateur voit tout."""
+        p = self.parent()
+        return bool(p) and (p["role"] == "admin" or prof["family"] == p["id"])
+
+    def device_family(self):
+        key = self.headers.get("X-Family-Key") or (getattr(self, "_qs", {}).get("fkey") or [""])[0]
+        if not key:
+            return None
+        r = rows("SELECT parent FROM devices WHERE key=?", (key,))
+        return r[0]["parent"] if r else None
 
     def profile_token(self, qs=None):
         tok = self.headers.get("X-Profile-Token") or ""
@@ -337,6 +408,8 @@ class Handler(BaseHTTPRequestHandler):
         self.api("DELETE", urllib.parse.urlparse(self.path).path, {})
 
     def api(self, method, path, qs):
+        self.__dict__.pop("_parent", None)  # connexion keep-alive : rien ne doit survivre d'une requête à l'autre
+        self._qs = qs
         if method == "POST" and path.rstrip("/") == "/api/upload":
             return self.upload(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         try:
@@ -357,9 +430,9 @@ class Handler(BaseHTTPRequestHandler):
         kind = KINDS.get((qs.get("kind") or [""])[0])
         n = int(self.headers.get("Content-Length") or 0)
         self._qs = qs
-        if not self.parent_ok({"pin": self.headers.get("X-Pin", "")}):
+        if not self.is_admin({"pin": self.headers.get("X-Pin", "")}):
             self.rfile.read(n)
-            return self.error(403, "code parent incorrect")
+            return self.error(403, "réservé à l'administrateur")
         if not re.fullmatch(r"20\d\d", year) or not kind:
             self.rfile.read(n)
             return self.error(400, "année (AAAA) et type (questionnaire, correction, portfolio) requis")
@@ -394,36 +467,6 @@ class Handler(BaseHTTPRequestHandler):
         head = parts[0] if parts else ""
         self._qs = qs
 
-        if head == "parent" and len(parts) == 2 and method == "POST":
-            act = parts[1]
-            if act == "setup":  # création du code parent (uniquement s'il n'existe pas)
-                if get_setting("pin"):
-                    return self.error(409, "un code parent existe déjà")
-                np_ = str(data.get("new_pin") or "")
-                if not re.fullmatch(r"\d{4,8}", np_):
-                    return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
-                set_setting("pin", pin_hash(np_))
-                return self.send_json({"token": new_token(0)})
-            if act == "login":
-                if not get_setting("pin"):
-                    return self.error(412, "aucun code parent défini")
-                n, until = _fails.get("parent", (0, 0))
-                if until > time.time():
-                    return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
-                if self.parent_ok({"pin": data.get("pin", "")}):
-                    _fails.pop("parent", None)
-                    return self.send_json({"token": new_token(0), "hours": PARENT_HOURS})
-                n += 1
-                _fails["parent"] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
-                return self.error(403, "code parent incorrect")
-            if act == "logout":
-                tok = self.headers.get("X-Parent-Token", "")
-                if tok:
-                    execute("DELETE FROM tokens WHERE token=? AND profile=0", (tok,))
-                return self.send_json({"ok": True})
-            if act == "check":
-                return self.send_json({"ok": self.parent_ok()})
-
         if head == "status" and method == "GET":
             cat = os.path.exists(CATALOG)
             return self.send_json({"ready": cat, "building": BUILD["running"], "log": BUILD["log"][-30:],
@@ -447,35 +490,161 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data_)
             return
-        if head == "rebuild" and method == "POST":
-            if not self.strict_pin(data):
+
+        # ------------------------------------------------------------ comptes parents / familles
+        if head == "parent" and len(parts) == 2:
+            act = parts[1]
+            if act == "setup" and method == "POST":  # premier compte = administrateur
+                if rows("SELECT id FROM parents LIMIT 1"):
+                    return self.error(409, "un code parent existe déjà")
+                np_ = str(data.get("new_pin") or "")
+                if not PIN_RE.fullmatch(np_):
+                    return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                name = (str(data.get("name") or "").strip() or "Administrateur")[:40]
+                aid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
+                              (name, code_hash(np_), "admin", time.time()))
+                execute("UPDATE profiles SET family=? WHERE family IS NULL", (aid,))
+                return self.send_json({"token": new_parent_token(aid), "parent": parent_info(aid)})
+            if act == "login" and method == "POST":
+                if not rows("SELECT id FROM parents LIMIT 1"):
+                    return self.error(412, "aucun code parent défini")
+                n, until = _fails.get("parent", (0, 0))
+                if until > time.time():
+                    return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
+                p = find_parent_by_pin(str(data.get("pin") or ""))
+                if p:
+                    _fails.pop("parent", None)
+                    return self.send_json({"token": new_parent_token(p["id"]), "parent": parent_info(p["id"]),
+                                           "hours": PARENT_HOURS})
+                n += 1
+                _fails["parent"] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
                 return self.error(403, "code parent incorrect")
+            if act == "logout" and method == "POST":
+                tok = self.headers.get("X-Parent-Token", "")
+                if tok:
+                    execute("DELETE FROM tokens WHERE token=? AND profile=0", (tok,))
+                return self.send_json({"ok": True})
+            if act == "check" and method == "POST":
+                p = self.parent()
+                return self.send_json({"ok": bool(p), "parent": parent_info(p["id"]) if p else None})
+            if act == "children" and method == "GET":
+                p = self.parent()
+                if not p:
+                    return self.error(403, "code parent incorrect")
+                sql = "SELECT p.id, p.name, p.avatar, p.color, p.created, (p.code IS NOT NULL AND p.code <> '') AS has_code, " \
+                      "p.family AS family, pa.name AS family_name FROM profiles p " \
+                      "LEFT JOIN parents pa ON pa.id = p.family WHERE p.archived=0"
+                out = rows(sql + " ORDER BY pa.name, p.id") if p["role"] == "admin" else \
+                    rows(sql + " AND p.family=? ORDER BY p.id", (p["id"],))
+                for c in out:
+                    c["has_code"] = bool(c["has_code"])
+                return self.send_json(out)
+
+        if head == "parents":
+            p = self.parent()
+            if not p:
+                return self.error(403, "code parent incorrect")
+            if len(parts) == 1:
+                if p["role"] != "admin":
+                    return self.error(403, "réservé à l'administrateur")
+                if method == "GET":
+                    return self.send_json(rows("SELECT pa.id, pa.name, pa.role, pa.created, "
+                                               "(SELECT COUNT(*) FROM profiles WHERE family=pa.id) AS children "
+                                               "FROM parents pa ORDER BY pa.role, pa.name"))
+                if method == "POST":
+                    name = str(data.get("name") or "").strip()[:40]
+                    np_ = str(data.get("pin") or "")
+                    if not name:
+                        return self.error(400, "nom de la famille requis")
+                    if not PIN_RE.fullmatch(np_):
+                        return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                    if find_parent_by_pin(np_):
+                        return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
+                    nid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
+                                  (name, code_hash(np_), "parent", time.time()))
+                    return self.send_json(parent_info(nid), 201)
+            tid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            if tid is None or not rows("SELECT id FROM parents WHERE id=?", (tid,)):
+                return self.error(404, "famille inconnue")
+            if p["role"] != "admin" and tid != p["id"]:
+                return self.error(403, "réservé à l'administrateur")
+            if method == "PUT":
+                if data.get("name"):
+                    execute("UPDATE parents SET name=? WHERE id=?", (str(data["name"]).strip()[:40], tid))
+                if data.get("pin") is not None and data.get("pin") != "":
+                    np_ = str(data["pin"])
+                    if not PIN_RE.fullmatch(np_):
+                        return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                    other = find_parent_by_pin(np_)
+                    if other and other["id"] != tid:
+                        return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
+                    execute("UPDATE parents SET pin=? WHERE id=?", (code_hash(np_), tid))
+                    execute("DELETE FROM tokens WHERE profile=0 AND parent=? AND token<>?",
+                            (tid, self.headers.get("X-Parent-Token", "")))
+                return self.send_json(parent_info(tid))
+            if method == "DELETE":
+                if p["role"] != "admin" or tid == p["id"]:
+                    return self.error(403, "impossible de supprimer ce compte")
+                if rows("SELECT id FROM profiles WHERE family=? LIMIT 1", (tid,)):
+                    return self.error(409, "supprime d'abord les enfants de cette famille")
+                execute("DELETE FROM tokens WHERE profile=0 AND parent=?", (tid,))
+                execute("DELETE FROM devices WHERE parent=?", (tid,))
+                execute("DELETE FROM parents WHERE id=?", (tid,))
+                return self.send_json({"ok": True})
+
+        if head == "family" and len(parts) == 2:
+            act = parts[1]
+            if act == "bind" and method == "POST":  # associe cette tablette à la famille du parent connecté
+                p = self.parent() or find_parent_by_pin(str(data.get("pin") or ""))
+                if not p:
+                    return self.error(403, "code parent incorrect")
+                key = secrets.token_urlsafe(24)
+                execute("INSERT INTO devices(key,parent,created,label) VALUES(?,?,?,?)",
+                        (key, p["id"], time.time(), str(data.get("label") or "")[:60]))
+                return self.send_json({"key": key, "family": parent_info(p["id"])})
+            if act == "info" and method == "GET":
+                fam = self.device_family()
+                if fam is None:
+                    return self.error(404, "tablette non associée")
+                return self.send_json({"family": parent_info(fam)})
+            if act == "unbind" and method == "POST":
+                execute("DELETE FROM devices WHERE key=?", (self.headers.get("X-Family-Key", ""),))
+                return self.send_json({"ok": True})
+
+        if head == "rebuild" and method == "POST":
+            if not self.is_admin(data):
+                return self.error(403, "réservé à l'administrateur")
             return self.send_json({"started": run_build(force=True)})
 
         if head == "settings":
             if method == "GET":
-                return self.send_json({"pin": bool(get_setting("pin")),
+                return self.send_json({"pin": bool(rows("SELECT id FROM parents LIMIT 1")),
                                        "prefs": json.loads(get_setting("prefs", "{}"))})
             if method == "PUT":
-                if not self.check_pin(data):
+                p = self.parent_ok(data)
+                if not p:
                     return self.error(403, "code parent incorrect")
-                if "new_pin" in data:
-                    np_ = str(data["new_pin"] or "")
-                    if np_ and not re.fullmatch(r"\d{4,8}", np_):
+                if data.get("new_pin"):
+                    np_ = str(data["new_pin"])
+                    if not PIN_RE.fullmatch(np_):
                         return self.error(400, "le code doit contenir 4 à 8 chiffres")
-                    set_setting("pin", pin_hash(np_) if np_ else "")
-                if "prefs" in data:
+                    other = find_parent_by_pin(np_)
+                    if other and other["id"] != p["id"]:
+                        return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
+                    execute("UPDATE parents SET pin=? WHERE id=?", (code_hash(np_), p["id"]))
+                if "prefs" in data and p["role"] == "admin":
                     set_setting("prefs", json.dumps(data["prefs"]))
                 return self.send_json({"ok": True})
         if head == "uploads" and method == "DELETE" and len(parts) == 2:
-            if not self.strict_pin(data):
-                return self.error(403, "code parent incorrect")
+            if not self.is_admin(data):
+                return self.error(403, "réservé à l'administrateur")
             name = os.path.basename(parts[1])
-            p = os.path.join(UPLOAD_DIR, name)
-            if not os.path.isfile(p):
+            fp = os.path.join(UPLOAD_DIR, name)
+            if not os.path.isfile(fp):
                 return self.error(404, "fichier téléversé introuvable")
-            os.remove(p)
+            os.remove(fp)
             return self.send_json({"ok": True})
+
         if head == "yearconfig" and len(parts) == 2 and re.fullmatch(r"\d{4}", parts[1]):
             y = parts[1]
             local_path = os.path.join(DATA_DIR, "years.local.json")
@@ -484,8 +653,8 @@ class Handler(BaseHTTPRequestHandler):
                 base = json.load(open(os.path.join(ROOT, "builder", "years.json"))).get(y, {})
                 return self.send_json({"base": base, "local": local.get(y, {})})
             if method == "PUT":
-                if not self.strict_pin(data):
-                    return self.error(403, "code parent incorrect")
+                if not self.is_admin(data):
+                    return self.error(403, "réservé à l'administrateur")
                 cfg = data.get("config")
                 if cfg is None:
                     local.pop(y, None)
@@ -496,35 +665,43 @@ class Handler(BaseHTTPRequestHandler):
                 with open(local_path, "w") as f:
                     json.dump(local, f, ensure_ascii=False, indent=1)
                 return self.send_json({"ok": True})
-        if head == "pin" and method == "POST":
-            return self.send_json({"ok": self.check_pin(data)})
-
         if head == "profiles":
             if len(parts) == 1:
-                if method == "GET":
-                    out = rows(f"SELECT {PUBLIC_PROFILE} FROM profiles WHERE archived=0 ORDER BY id")
-                    for p in out:
-                        p["has_code"] = bool(p["has_code"])
+                if method == "GET":  # enfants de la famille associée à cette tablette
+                    fam = self.device_family()
+                    if fam is None:
+                        return self.send_json([])
+                    out = rows(f"SELECT {PUBLIC_PROFILE} FROM profiles WHERE archived=0 AND family=? ORDER BY id", (fam,))
+                    for c in out:
+                        c["has_code"] = bool(c["has_code"])
                     return self.send_json(out)
                 if method == "POST":
+                    p = self.parent_ok(data)
+                    if not p:
+                        return self.error(403, "code parent requis pour ajouter un enfant")
                     name = (data.get("name") or "").strip()[:40]
                     code = str(data.get("code") or "")
                     if not name:
                         return self.error(400, "prénom requis")
                     if not CODE_RE.fullmatch(code):
                         return self.error(400, "le code de l'enfant doit contenir 4 à 6 chiffres")
-                    if get_setting("pin") and rows("SELECT id FROM profiles LIMIT 1") and not self.check_pin(data):
-                        return self.error(403, "code parent incorrect")
-                    pid = execute("INSERT INTO profiles(name,avatar,color,created,code) VALUES(?,?,?,?,?)",
+                    fam = p["id"]
+                    if p["role"] == "admin" and str(data.get("family") or "").isdigit() and \
+                            rows("SELECT id FROM parents WHERE id=?", (int(data["family"]),)):
+                        fam = int(data["family"])
+                    pid = execute("INSERT INTO profiles(name,avatar,color,created,code,family) VALUES(?,?,?,?,?,?)",
                                   (name, str(data.get("avatar", "🦊"))[:8], str(data.get("color", "#4f6df5"))[:16],
-                                   time.time(), code_hash(code)))
+                                   time.time(), code_hash(code), fam))
                     return self.send_json({**public_profile(pid), "token": new_token(pid)}, 201)
             pid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             if pid is None or not rows("SELECT id FROM profiles WHERE id=?", (pid,)):
                 return self.error(404, "profil inconnu")
             sub = parts[2] if len(parts) > 2 else ""
-            prof = rows("SELECT code FROM profiles WHERE id=?", (pid,))[0]
+            prof = rows("SELECT code, family FROM profiles WHERE id=?", (pid,))[0]
+            parent_access = self.can_access(prof)
             if sub == "login" and method == "POST":
+                if self.device_family() != prof["family"] and not parent_access:
+                    return self.error(403, "ce profil n'appartient pas à la famille de cette tablette")
                 n, until = _fails.get(pid, (0, 0))
                 if until > time.time():
                     return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
@@ -532,26 +709,24 @@ class Handler(BaseHTTPRequestHandler):
                 if not prof["code"]:
                     # code réinitialisé par un parent : accès accordé, l'enfant doit choisir un nouveau code
                     return self.send_json({"token": new_token(pid), "needs_code": True})
-                if code_ok(code, prof["code"]) or (data.get("pin") and self.strict_pin(data)):
+                if code_ok(code, prof["code"]):
                     _fails.pop(pid, None)
                     return self.send_json({"token": new_token(pid), "needs_code": False})
                 n += 1
                 _fails[pid] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
                 return self.error(403, "code incorrect" + (" — accès bloqué 30 s" if n >= 5 else ""))
             if sub == "resetcode" and method == "POST":
-                if not get_setting("pin"):
-                    return self.error(412, "définis d'abord un code parent (Espace parent → Réglages)")
-                if not self.strict_pin(data):
+                if not parent_access:
                     return self.error(403, "code parent incorrect")
                 execute("UPDATE profiles SET code=NULL WHERE id=?", (pid,))
                 execute("DELETE FROM tokens WHERE profile=?", (pid,))
                 _fails.pop(pid, None)
                 return self.send_json({"ok": True})
             parent_only = (sub == "" and method == "DELETE") or (sub == "reset" and method == "POST")
-            authed = token_profile(self.profile_token(qs)) == pid or self.parent_ok()
-            parent_edit = sub == "" and method == "PUT" and "pin" in data and self.check_pin(data)
-            if not (parent_only or authed or parent_edit or ("pin" in data and self.strict_pin(data))):
-                return self.error(401, "code de l'enfant requis")
+            authed = (token_profile(self.profile_token(qs)) == pid and not parent_only) or parent_access
+            if not authed:
+                return self.error(403 if parent_only else 401,
+                                  "code parent incorrect" if parent_only else "code de l'enfant requis")
             if sub == "logout" and method == "POST":
                 execute("DELETE FROM tokens WHERE token=?", (self.profile_token(qs),))
                 return self.send_json({"ok": True})
@@ -568,15 +743,11 @@ class Handler(BaseHTTPRequestHandler):
                         (data.get("name"), data.get("avatar"), data.get("color"), pid))
                 return self.send_json(public_profile(pid))
             if sub == "" and method == "DELETE":
-                if not self.strict_pin(data):
-                    return self.error(403, "code parent incorrect")
                 for t in ("attempts", "exams", "drills", "notes", "answers", "tokens"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
                 execute("DELETE FROM profiles WHERE id=?", (pid,))
                 return self.send_json({"ok": True})
             if sub == "reset" and method == "POST":
-                if not self.strict_pin(data):
-                    return self.error(403, "code parent incorrect")
                 for t in ("attempts", "exams", "drills", "notes", "answers"):
                     execute(f"DELETE FROM {t} WHERE profile=?", (pid,))
                 return self.send_json({"ok": True})

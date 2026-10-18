@@ -18,9 +18,10 @@ Les enfants travaillent **question par question** sur les vraies épreuves, comp
 | 📤 **Fichiers CEB** | Téléversement des PDF d'une nouvelle année depuis le navigateur, détection automatique des livrets et des sections de correction, réglage fin des plages de pages si nécessaire, analyse incrémentale (les années inchangées sont reprises du cache). |
 | 🎧 **Écouter** | Le texte lu par l'enseignant est extrait de la correction et lu par la synthèse vocale de l'appareil (vitesse réglable, résumés de la dernière question). |
 | ⚡ **Exercices rapides** | Séries générées à l'infini avec correction immédiate : tables, calcul mental, ×/: par 10-100-1 000, fractions et pourcentages, arrondis, décimaux, conversions, durées, périmètres et aires, conjugaison, homophones. 3 niveaux. |
-| 🔒 **Espace Parents** | Accès par **code parent** (demandé à chaque entrée, verrouillage manuel ou après 4 h, créé au premier accès). Regroupe : **📈 Progrès** de chaque enfant (réussite par discipline et compétence, carte d'activité, examens blancs, simulation du CEB, exercices, export CSV), **📤 Fichiers CEB** (téléversement, analyse, réglage fin), **👨‍👩‍👧 Enfants** (ajout, modification, réinitialisation du code, remise à zéro, suppression) et **⚙️ Réglages**. |
+| 👪 **Familles** | Plusieurs familles peuvent partager le même serveur : chaque famille a **son propre code parent** et **ne voit que ses enfants** (progrès, gestion, codes). Chaque tablette est associée une fois à une famille avec le code parent ; l'écran « Qui révise aujourd'hui ? » n'affiche alors que les enfants de cette famille. Le premier compte créé est l'**administrateur** : il gère les fichiers CEB et les familles, et voit la progression de tous les enfants. |
+| 🔒 **Espace Parents** | Accès par **code parent** (demandé à chaque entrée ; la session se ferme dès qu'on quitte l'espace, avec « Verrouiller » ou après 4 h). Regroupe : **📈 Progrès** de ses enfants (tous pour l'administrateur) (réussite par discipline et compétence, carte d'activité, examens blancs, simulation du CEB, exercices, export CSV), **👨‍👩‍👧 Enfants** (ajout, modification, réinitialisation du code, remise à zéro, suppression), **⚙️ Réglages** (son code parent, association de la tablette) et, pour l'administrateur, **📤 Fichiers CEB** et **👪 Familles** (créer une famille avec son code, renommer, nouveau code, supprimer). |
 | 👨‍👩‍👧 **Multi-enfants** | Un profil par enfant protégé par un **code secret** (4 à 6 chiffres, pavé numérique adapté aux enfants), choisi à la création du profil. L'enfant peut changer son code ; en cas d'oubli, un parent le **réinitialise** (code parent requis) et l'enfant en choisit un nouveau à sa prochaine connexion. 5 erreurs de suite bloquent le profil 30 s, puis plus longtemps. |
-| 🔑 **Code parent** | Obligatoire : il est créé au premier accès à l'espace Parents (ou au premier ajout d'enfant) et protège tout ce qui relève des parents, côté interface **et** côté serveur (téléversement, analyse, profils, codes enfants, progression des enfants). |
+| 🔑 **Codes parents** | Un code par famille, unique sur le serveur (c'est lui qui identifie la famille). Le cloisonnement est appliqué **par le serveur** : une session parent ne peut lire ou modifier que les enfants de sa famille, seul l'administrateur peut téléverser, lancer l'analyse et gérer les familles. Un ancien code parent unique est migré automatiquement en compte administrateur. |
 | 📱 **Tablette** | Interface responsive, mode sombre, installable sur l'écran d'accueil, impression d'une question. |
 
 Aucune donnée ne quitte votre réseau : pas de compte, pas de service externe.
@@ -89,7 +90,10 @@ pdf/                PDF officiels (non versionnés)
 | GET | `/api/status` | état de la construction du catalogue |
 | GET | `/api/catalog` | années, livrets, questions et zones |
 | GET/POST | `/api/profiles` | profils enfants |
-| POST | `/api/parent/setup` · `/login` · `/check` · `/logout` | création du code parent (une seule fois) · session parent → jeton `X-Parent-Token` (4 h) |
+| POST | `/api/parent/setup` · `/login` · `/check` · `/logout` | création du compte administrateur (une seule fois) · session parent → jeton `X-Parent-Token` (4 h) |
+| GET | `/api/parent/children` | enfants visibles par la session parent (sa famille, ou tous pour l'administrateur) |
+| GET/POST/PUT/DELETE | `/api/parents[/{id}]` | familles (administrateur ; un parent peut changer son propre code) |
+| POST/GET | `/api/family/bind` · `/info` · `/unbind` | association d'une tablette à une famille → clé `X-Family-Key` ; `GET /api/profiles` ne renvoie que les enfants de cette famille |
 | POST | `/api/profiles/{id}/login` | code de l'enfant → jeton de session (en-tête `X-Profile-Token` pour les routes du profil) |
 | POST | `/api/profiles/{id}/setcode` · `/logout` | changer son code · se déconnecter |
 | POST | `/api/profiles/{id}/resetcode` | réinitialisation du code par un parent (session parent requise) |
