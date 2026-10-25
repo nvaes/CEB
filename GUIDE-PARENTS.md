@@ -7,6 +7,14 @@ L'administrateur du site vous a donné :
 - **l'adresse du site** (à ouvrir dans le navigateur) ;
 - **votre code parent** à 6 chiffres — il identifie votre famille, gardez-le pour vous.
 
+### Adresse sécurisée (https)
+
+Préférez l'adresse qui commence par **https://** (port 8443) : les échanges entre la tablette et le serveur sont alors chiffrés.
+
+La première fois, le navigateur affiche un avertissement du type « Votre connexion n'est pas privée ». C'est normal : le certificat du site est créé par l'administrateur, et non acheté auprès d'un organisme. Touchez **Paramètres avancés → Continuer vers le site** (Chrome, Edge) ou **Afficher les détails → visiter ce site web** (Safari, iPad). Le navigateur s'en souvient ensuite.
+
+> N'acceptez cet avertissement que pour l'adresse donnée par l'administrateur. Si l'avertissement réapparaît sans raison plus tard, prévenez-le avant de continuer.
+
 ---
 
 ## 1. Première utilisation (5 minutes)
@@ -112,6 +120,9 @@ Vous ne voyez **que vos enfants**. Les autres familles ne voient pas les vôtres
 ---
 
 ## 6. Questions fréquentes
+
+**« Votre connexion n'est pas privée » s'affiche.**
+C'est attendu avec l'adresse https la première fois (voir section « Adresse sécurisée »). Si cela revient alors que vous l'aviez déjà accepté, demandez à l'administrateur avant de continuer.
 
 **Le site ne s'ouvre plus du tout.**
 Votre connexion est peut-être bloquée après trop de codes faux. Attendez une heure, ou contactez l'administrateur.

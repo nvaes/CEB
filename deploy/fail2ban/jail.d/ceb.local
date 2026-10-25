@@ -16,8 +16,8 @@ findtime = 10m
 bantime  = 1h
 # le port publié par Docker ne passe pas par INPUT : on bloque dans DOCKER-USER (IPv4 et IPv6),
 # et dans INPUT pour les connexions relayées par docker-proxy
-action   = iptables-multiport[name=ceb, port="8080", protocol=tcp, chain=DOCKER-USER]
-           iptables-multiport[name=ceb-in, port="8080", protocol=tcp, chain=INPUT]
+action   = iptables-multiport[name=ceb, port="8080,8443", protocol=tcp, chain=DOCKER-USER]
+           iptables-multiport[name=ceb-in, port="8080,8443", protocol=tcp, chain=INPUT]
 
 [sshd]
 enabled  = true

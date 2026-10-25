@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Europe/Brussels
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-fra tzdata \
+ && apt-get install -y --no-install-recommends poppler-utils openssl tesseract-ocr tesseract-ocr-fra tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

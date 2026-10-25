@@ -14,6 +14,8 @@ import secrets
 import mimetypes
 import os
 import re
+import socket
+import ssl
 import sqlite3
 import subprocess
 import sys
@@ -40,6 +42,13 @@ AUTH_LOG = os.path.join(SEC_DIR, "auth.log")
 F2B_STATUS = os.path.join(SEC_DIR, "fail2ban.json")
 F2B_UNBAN = os.path.join(SEC_DIR, "unban.json")
 TRUST_PROXY = os.environ.get("CEB_TRUST_PROXY", "").lower() in ("1", "true", "yes", "oui")
+# HTTPS : second port avec un certificat autosigné créé au premier démarrage (0 = désactivé)
+HTTPS_PORT = int(os.environ.get("CEB_HTTPS_PORT", "0") or 0)
+TLS_DIR = os.path.join(DATA_DIR, "tls")
+TLS_CERT = os.environ.get("CEB_TLS_CERT", os.path.join(TLS_DIR, "cert.pem"))
+TLS_KEY = os.environ.get("CEB_TLS_KEY", os.path.join(TLS_DIR, "key.pem"))
+TLS_SAN = os.environ.get("CEB_TLS_SAN", "")  # ex. « IP:192.168.1.10,DNS:ceb.maison.be »
+TLS_DAYS = 825  # durée maximale acceptée par iOS / macOS
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("image/svg+xml", ".svg")
@@ -370,6 +379,7 @@ def request_unban(ip, by):
 class Handler(BaseHTTPRequestHandler):
     server_version = "RevisionCEB/1.0"
     protocol_version = "HTTP/1.1"
+    timeout = 120  # connexion inactive (ou poignée de main TLS qui traîne) fermée
 
     def log_message(self, fmt, *args):  # journal discret
         if os.environ.get("CEB_ACCESS_LOG"):
@@ -944,13 +954,61 @@ class Handler(BaseHTTPRequestHandler):
         return self.error(404, "route inconnue")
 
 
+# ------------------------------------------------------------------ HTTPS (certificat autosigné)
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # client parti, HTTP en clair sur le port HTTPS, certificat refusé… : rien d'anormal côté serveur
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError, ssl.SSLError, socket.timeout)):
+            return
+        super().handle_error(request, client_address)
+
+
+def ensure_cert():
+    """Crée (ou renouvelle à 30 jours de l'échéance) le certificat autosigné de /data/tls."""
+    if os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
+        if TLS_CERT != os.path.join(TLS_DIR, "cert.pem"):
+            return  # certificat fourni par l'administrateur : on n'y touche pas
+        if subprocess.run(["openssl", "x509", "-checkend", str(30 * 86400), "-noout", "-in", TLS_CERT],
+                          capture_output=True).returncode == 0:
+            return
+        print("[tls] certificat bientôt expiré : renouvellement", flush=True)
+    os.makedirs(TLS_DIR, exist_ok=True)
+    san = ",".join(x for x in ["DNS:localhost", "IP:127.0.0.1", TLS_SAN.strip(" ,")] if x)
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", str(TLS_DAYS),
+                    "-keyout", TLS_KEY, "-out", TLS_CERT, "-subj", "/CN=Revision CEB/O=Revision CEB (auto-signe)",
+                    "-addext", f"subjectAltName={san}", "-addext", "extendedKeyUsage=serverAuth",
+                    "-addext", "keyUsage=critical,digitalSignature,keyEncipherment"],
+                   check=True, capture_output=True)
+    os.chmod(TLS_KEY, 0o600)
+    print(f"[tls] certificat autosigné créé ({san}, {TLS_DAYS} jours)", flush=True)
+
+
+def https_server():
+    ensure_cert()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+    srv = Server(("0.0.0.0", HTTPS_PORT), Handler)
+    # poignée de main faite dans le fil de la requête : un client lent ne bloque pas les autres
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+    return srv
+
+
 def main():
     init_db()
     run_build()
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    srv.daemon_threads = True
+    srv = Server(("0.0.0.0", PORT), Handler)
     print(f"[web] Révision CEB disponible sur http://0.0.0.0:{PORT}  (PDF : {PDF_DIR}, données : {DATA_DIR})",
           flush=True)
+    if HTTPS_PORT:
+        try:
+            tls = https_server()
+            threading.Thread(target=tls.serve_forever, daemon=True).start()
+            print(f"[web] … et sur https://0.0.0.0:{HTTPS_PORT} (certificat : {TLS_CERT})", flush=True)
+        except Exception as e:  # le site reste disponible en HTTP
+            print(f"[tls] HTTPS désactivé : {e!r}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

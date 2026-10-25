@@ -127,6 +127,18 @@ CEB_PDF_DIR=./pdf CEB_DATA_DIR=./data PORT=8080 python3 app/server.py
 
 Le site est prévu pour un réseau domestique (HTTP, sans compte). Les codes enfants et le code parent sont stockés hachés (PBKDF2 / SHA-256) ; 5 erreurs de suite bloquent temporairement la saisie (enfant ou parent) ; la session parent n'est gardée qu'en mémoire du navigateur (verrouillée au rechargement de la page) ; les codes enfants servent à séparer les profils entre frères et sœurs, pas à protéger le site contre un attaquant du réseau. Pour un accès depuis l'extérieur, placer le site derrière un reverse proxy avec HTTPS et authentification (ou un VPN). Les profils créés avant l'ajout des codes demandent à l'enfant de créer son code à la première connexion.
 
+### HTTPS (certificat autosigné)
+
+Le site répond aussi en **HTTPS sur le port 8443** (`CEB_HTTPS_PORT=8443` dans `docker-compose.yml`, `0` pour désactiver), le port 8080 restant en HTTP. Au premier démarrage, un certificat autosigné (RSA 2048, 825 jours, renouvelé automatiquement à 30 jours de l'échéance) est créé dans le volume : `/data/tls/cert.pem` et `key.pem`. Les adresses par lesquelles on joint le serveur doivent figurer dans le certificat — à indiquer dans un fichier `.env` (non versionné) à côté de `docker-compose.yml` :
+
+```sh
+CEB_TLS_SAN=IP:192.168.1.10,DNS:ceb.maison.be
+```
+
+Après un changement : supprimer `/data/tls/*.pem` (`docker exec revision-ceb rm /data/tls/cert.pem /data/tls/key.pem`) puis redémarrer le conteneur. Pour utiliser un vrai certificat, définir `CEB_TLS_CERT` et `CEB_TLS_KEY` (chemins dans le conteneur, fichiers montés en lecture) : il n'est alors jamais régénéré.
+
+Le navigateur affiche un avertissement la première fois (certificat non reconnu) : vérifier l'empreinte SHA-256 (`openssl x509 -noout -fingerprint -sha256 -in cert.pem`) puis accepter, ou installer `cert.pem` comme certificat de confiance sur les appareils de la famille.
+
 ### fail2ban (hôte Docker)
 
 ```sh
@@ -136,7 +148,7 @@ sh deploy/fail2ban/install.sh
 EXTRA_IGNORE="192.168.1.0/24" sh deploy/fail2ban/install.sh
 ```
 
-Le script installe fail2ban, le filtre `ceb-auth`, les prisons `ceb-auth` et `sshd` (`/etc/fail2ban/jail.d/ceb.local`), la rotation du journal, et le service `ceb-f2b-status` (minuterie chaque minute + déclenchement immédiat sur demande de déblocage) qui écrit `security/fail2ban.json` dans le volume `/data` pour l'onglet Sécurité. Le port publié par Docker est filtré dans la chaîne `DOCKER-USER` (et `INPUT`). Derrière un reverse proxy, définir `CEB_TRUST_PROXY=1` pour utiliser l'IP de `X-Forwarded-For` — sinon c'est l'IP du proxy qui serait bloquée.
+Le script installe fail2ban, le filtre `ceb-auth`, les prisons `ceb-auth` et `sshd` (`/etc/fail2ban/jail.d/ceb.local`), la rotation du journal, et le service `ceb-f2b-status` (minuterie chaque minute + déclenchement immédiat sur demande de déblocage) qui écrit `security/fail2ban.json` dans le volume `/data` pour l'onglet Sécurité. Les ports publiés par Docker (8080 et 8443) sont filtrés dans la chaîne `DOCKER-USER` (et `INPUT`). Derrière un reverse proxy, définir `CEB_TRUST_PROXY=1` pour utiliser l'IP de `X-Forwarded-For` — sinon c'est l'IP du proxy qui serait bloquée.
 
 Attention : les tablettes d'une même maison partagent souvent la même IP publique ; un enfant qui se trompe beaucoup peut faire bloquer toute la maison. Ajouter ce réseau à `EXTRA_IGNORE`, ou débloquer depuis l'onglet Sécurité (ou `fail2ban-client unban <ip>`).
 
