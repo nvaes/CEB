@@ -37,11 +37,15 @@ def process_unbans():
         return []
     done = []
     for p in pending:
-        try:
-            ip = str(ipaddress.ip_address(str(p.get("ip", ""))))
-        except ValueError:
-            continue
-        rc, out = f2b("unban", ip)
+        if p.get("ip") == "all":
+            ip = "all"
+            rc, out = f2b("unban", "--all")
+        else:
+            try:
+                ip = str(ipaddress.ip_address(str(p.get("ip", ""))))
+            except ValueError:
+                continue
+            rc, out = f2b("unban", ip)
         done.append({"ip": ip, "by": p.get("by"), "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "rc": rc})
     os.remove(UNBAN)
     return done

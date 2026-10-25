@@ -722,10 +722,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 1 and method == "GET":
                 return self.send_json(security_report())
             if len(parts) == 2 and parts[1] == "unban" and method == "POST":
-                try:
-                    ip = str(ipaddress.ip_address(str(data.get("ip") or "").strip()))
-                except ValueError:
-                    return self.error(400, "adresse IP invalide")
+                ip = str(data.get("ip") or "").strip()
+                if ip != "all":  # « all » : débloque toutes les adresses de toutes les prisons
+                    try:
+                        ip = str(ipaddress.ip_address(ip))
+                    except ValueError:
+                        return self.error(400, "adresse IP invalide")
                 request_unban(ip, self.parent()["name"])
                 return self.send_json({"ok": True, "ip": ip})
 

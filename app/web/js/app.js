@@ -1179,7 +1179,13 @@
           <div style="font-size:1.4rem;font-weight:800;color:${banned.length ? "var(--ko)" : "inherit"}">${banned.length}</div>
           <div class="tiny">${jails.map((j) => `${esc(j.name)} : ${j.currently_failed ?? 0} en observation, ${j.total_banned ?? 0} blocage${(j.total_banned ?? 0) > 1 ? "s" : ""} au total`).join("<br>") || "—"}</div></div>
       </div>
-      <div class="section-title"><h2>Adresses bloquées</h2><button class="btn sm" id="secref">🔄 Actualiser</button></div>
+      <div class="section-title"><h2>Adresses bloquées</h2><div class="row"><button class="btn sm" id="secref">🔄 Actualiser</button>${banned.length > 1 && !pendingIps.has("all") ? `<button class="btn sm danger" data-unban="all">🔓 Tout débloquer</button>` : ""}</div></div>
+      <div class="card row" style="margin-bottom:12px">
+        <label class="small muted" for="unbanip">Débloquer une adresse IP :</label>
+        <input type="text" id="unbanip" placeholder="ex. 192.0.2.10" inputmode="decimal" autocomplete="off" spellcheck="false" style="width:220px">
+        <button class="btn sm primary" id="unbango">🔓 Débloquer</button>
+        <span class="tiny">même si elle n'apparaît pas dans la liste (ex. relevé pas encore à jour)</span>
+      </div>
       <div class="card table-wrap"><table><thead><tr><th>Adresse IP</th><th>Protection</th><th>Bloquée depuis</th><th>Jusqu'au</th><th></th></tr></thead><tbody>
         ${banned.map((b) => `<tr><td><b>${esc(b.ip)}</b></td><td class="small">${esc(b.jail)}</td><td class="small">${esc(b.since || "")}</td><td class="small">${esc(b.until || "")}</td>
           <td>${pendingIps.has(b.ip) ? `<span class="chip">déblocage demandé…</span>` : `<button class="btn sm" data-unban="${esc(b.ip)}">Débloquer</button>`}</td></tr>`).join("") || `<tr><td colspan="5" class="muted small">Aucune adresse bloquée.</td></tr>`}
@@ -1195,10 +1201,14 @@
       </tbody></table></div>`), true);
     bindShell();
     $("#secref").addEventListener("click", () => viewParentSecurity());
-    $$("[data-unban]").forEach((b) => b.addEventListener("click", async () => {
-      if (!confirm(`Débloquer l'adresse ${b.dataset.unban} ?`)) return;
-      try { await api("security/unban", { method: "POST", body: { ip: b.dataset.unban } }); toast("Déblocage demandé : effectif dans quelques secondes", 3000); setTimeout(() => location.hash === "#/parent/securite" && viewParentSecurity(), 4000); viewParentSecurity(); } catch (e) { toast(e.message); }
-    }));
+    const unban = async (ip) => {
+      if (!confirm(ip === "all" ? "Débloquer toutes les adresses bloquées ?" : `Débloquer l'adresse ${ip} ?`)) return;
+      try { await api("security/unban", { method: "POST", body: { ip } }); toast("Déblocage demandé : effectif dans quelques secondes", 3000); setTimeout(() => location.hash === "#/parent/securite" && viewParentSecurity(), 4000); viewParentSecurity(); } catch (e) { toast(e.message); }
+    };
+    $$("[data-unban]").forEach((b) => b.addEventListener("click", () => unban(b.dataset.unban)));
+    const typed = () => { const ip = $("#unbanip").value.trim(); if (!ip) return $("#unbanip").focus(); unban(ip); };
+    $("#unbango").addEventListener("click", typed);
+    $("#unbanip").addEventListener("keydown", (e) => { if (e.key === "Enter") typed(); });
   }
   async function viewParentSettings() {
     const st = await api("status");
