@@ -1046,6 +1046,7 @@
       if (pin === null) return false;
       let r; try { r = await api("parent/login", { method: "POST", body: { pin } }); } catch (e) { err = e.message; continue; }
       S.ptoken = r.token; S.parent = r.parent;
+      if (r.notice) await adminNotice(r.notice);
       if (!r.upgrade) return true;
       // ancien code parent (4, 5, 7 ou 8 chiffres) : passage obligatoire à 6 chiffres
       for (let e2 = "Les codes ont maintenant 6 chiffres : choisis ton nouveau code parent."; ;) {
@@ -1057,6 +1058,30 @@
         try { await api("settings", { method: "PUT", body: { new_pin: a } }); toast("Nouveau code parent enregistré 🔒"); return true; } catch (e) { e2 = e.message; }
       }
     }
+  }
+  /* --- connexion administrateur : dernière connexion et ce qui s'est passé depuis */
+  function adminNotice(n) {
+    const when = (ts) => new Date(ts * 1000).toLocaleString("fr-BE", { dateStyle: "full", timeStyle: "short" });
+    const items = [];
+    if (n.parent_fails) items.push(`<li><b style="color:var(--ko)">${n.parent_fails} code${n.parent_fails > 1 ? "s" : ""} parent incorrect${n.parent_fails > 1 ? "s" : ""}</b></li>`);
+    if (n.bans) items.push(`<li><b style="color:var(--ko)">${n.bans} adresse${n.bans > 1 ? "s" : ""} bloquée${n.bans > 1 ? "s" : ""}</b> par fail2ban</li>`);
+    if (n.families.length) items.push(`<li>${n.families.length} nouvelle${n.families.length > 1 ? "s" : ""} famille${n.families.length > 1 ? "s" : ""} : ${n.families.map((f) => esc(f.name)).join(", ")}</li>`);
+    const alert = n.parent_fails || n.bans;
+    return new Promise((resolve) => {
+      const bg = document.createElement("div"); bg.className = "modal-bg";
+      bg.innerHTML = `<div class="card modal stack" role="dialog" aria-label="Connexion administrateur" style="width:min(440px,100%)">
+        <div class="row"><span class="avatar big">${alert ? "⚠️" : "🔔"}</span><div><h2 style="margin:0">Connexion administrateur</h2><div class="tiny">Bonjour ${esc(S.parent?.name || "")}</div></div></div>
+        <p class="small" style="margin:0">${n.first ? "Première connexion administrateur enregistrée." : `Dernière connexion : <b>${esc(when(n.previous.ts))}</b><br>depuis l'adresse <b>${esc(n.previous.ip)}</b>`}</p>
+        ${n.first ? "" : `<p class="tiny" style="margin:0">Ce n'était pas toi ? Change ton code parent (⚙️ Réglages) et consulte l'onglet 🛡️ Sécurité.</p>`}
+        <div><div class="small muted">${n.first ? "Ces 7 derniers jours" : "Depuis cette connexion"} :</div>
+          ${items.length ? `<ul class="small" style="margin:4px 0 0;padding-left:18px">${items.join("")}</ul>` : `<p class="small" style="margin:4px 0 0">✅ Rien à signaler.</p>`}</div>
+        <div class="row" style="justify-content:flex-end">${alert ? `<button class="btn" data-n="sec">🛡️ Voir la sécurité</button>` : ""}<button class="btn primary" data-n="ok">D'accord</button></div></div>`;
+      document.body.appendChild(bg);
+      bg.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-n]"); if (!b) return;
+        bg.remove(); if (b.dataset.n === "sec") S.afterGate = "#/parent/securite"; resolve();
+      });
+    });
   }
   async function parentLock() {
     if (S.ptoken) await api("parent/logout", { method: "POST", body: {} }).catch(() => {});
@@ -1074,6 +1099,7 @@
   }
   async function viewParent(tab = "progres", arg) {
     if (!(await parentGate())) { location.hash = S.profile ? "#/" : "#/profils"; return; }
+    if (S.afterGate) { const h = S.afterGate; S.afterGate = null; if (location.hash !== h) { location.hash = h; return; } tab = "securite"; }
     S.pchildren = await api("parent/children");
     if (isAdmin()) S.families = await api("parents"); else S.families = [S.parent];
     if (tab === "fichiers" && isAdmin()) return viewFiles();

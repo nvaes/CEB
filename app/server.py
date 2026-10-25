@@ -331,6 +331,33 @@ def tail_lines(path, n=400, block=65536):
         return []
 
 
+def admin_login_notice(admin_id, ip):
+    """Connexion d'un administrateur : renvoie le résumé depuis sa connexion précédente, puis la mémorise."""
+    key = f"admin_last:{admin_id}"
+    try:
+        prev = json.loads(get_setting(key) or "null")
+    except ValueError:
+        prev = None
+    now = time.time()
+    set_setting(key, json.dumps({"ts": now, "ip": ip}))
+    since = prev["ts"] if prev else now - 7 * 86400  # première fois : les 7 derniers jours
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
+    fails = 0
+    for line in tail_lines(AUTH_LOG, 5000):
+        m = AUTH_RE.match(line)
+        if m and m[1] >= stamp and m[2] == "FAIL" and m[4].startswith("parent"):
+            fails += 1
+    bans = 0
+    try:
+        with open(F2B_STATUS) as f:
+            bans = sum(e.get("action") == "Ban" and e.get("ts", "") >= stamp for e in json.load(f).get("events", []))
+    except (OSError, ValueError):
+        pass
+    fams = rows("SELECT name, created FROM parents WHERE role<>'admin' AND created>? ORDER BY created", (since,))
+    return {"previous": prev, "since": since, "first": prev is None, "parent_fails": fails, "bans": bans,
+            "families": fams}
+
+
 def security_report():
     events = []
     for line in tail_lines(AUTH_LOG, 2000):
@@ -630,7 +657,9 @@ class Handler(BaseHTTPRequestHandler):
                     _fails.pop("parent", None)
                     # ancien code (autre que 6 chiffres) : accepté, mais il faut en choisir un nouveau
                     return self.send_json({"token": new_parent_token(p["id"]), "parent": parent_info(p["id"]),
-                                           "hours": PARENT_HOURS, "upgrade": not CODE_RE.fullmatch(pin)})
+                                           "hours": PARENT_HOURS, "upgrade": not CODE_RE.fullmatch(pin),
+                                           "notice": admin_login_notice(p["id"], self.client_ip())
+                                           if p["role"] == "admin" else None})
                 n += 1
                 _fails["parent"] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
                 return self.error(403, "code parent incorrect")
