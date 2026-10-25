@@ -139,6 +139,23 @@ Après un changement : supprimer `/data/tls/*.pem` (`docker exec revision-ceb rm
 
 Le navigateur affiche un avertissement la première fois (certificat non reconnu) : vérifier l'empreinte SHA-256 (`openssl x509 -noout -fingerprint -sha256 -in cert.pem`) puis accepter, ou installer `cert.pem` comme certificat de confiance sur les appareils de la famille.
 
+### E-mail à chaque nouvelle famille
+
+À chaque création d'une famille (et du compte administrateur), le site envoie un e-mail : nom de la famille, qui l'a créée, date, adresse IP, nombre de familles. Réglages dans `.env` (non versionné, `chmod 600`) ; sans `CEB_NOTIFY_TO` ni `CEB_SMTP_HOST`, rien n'est envoyé. L'envoi se fait en arrière-plan : une panne de messagerie ne bloque pas le site (voir `docker logs revision-ceb | grep mail`).
+
+```sh
+CEB_NOTIFY_TO=contact@exemple.be          # plusieurs adresses séparées par des virgules
+CEB_SMTP_HOST=smtp.office365.com
+CEB_SMTP_PORT=587
+CEB_SMTP_TLS=starttls                     # starttls | ssl | none
+CEB_SMTP_USER=noreply@exemple.be          # vide = pas d'authentification
+CEB_SMTP_PASSWORD=...
+CEB_SMTP_FROM=noreply@exemple.be          # défaut : CEB_SMTP_USER
+CEB_PUBLIC_URL=https://ceb.exemple.be:8443  # lien ajouté au message (facultatif)
+```
+
+Sans compte SMTP, on peut viser directement le serveur MX du domaine (port 25, sans authentification) ; il faut alors que l'IP publique du serveur soit autorisée dans l'enregistrement SPF du domaine expéditeur, sinon le message finit en courrier indésirable ou en quarantaine.
+
 ### fail2ban (hôte Docker)
 
 ```sh

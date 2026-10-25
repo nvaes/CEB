@@ -15,6 +15,15 @@ services:
       # adresses du serveur ajoutées au certificat (fichier .env à côté de ce fichier, non versionné) :
       #   CEB_TLS_SAN=IP:192.168.1.10,DNS:ceb.maison.be
       - CEB_TLS_SAN=${CEB_TLS_SAN:-}
+      # e-mail à chaque nouvelle famille (valeurs dans .env ; vide = désactivé)
+      - CEB_NOTIFY_TO=${CEB_NOTIFY_TO:-}
+      - CEB_SMTP_HOST=${CEB_SMTP_HOST:-}
+      - CEB_SMTP_PORT=${CEB_SMTP_PORT:-587}
+      - CEB_SMTP_TLS=${CEB_SMTP_TLS:-starttls}
+      - CEB_SMTP_USER=${CEB_SMTP_USER:-}
+      - CEB_SMTP_PASSWORD=${CEB_SMTP_PASSWORD:-}
+      - CEB_SMTP_FROM=${CEB_SMTP_FROM:-}
+      - CEB_PUBLIC_URL=${CEB_PUBLIC_URL:-}
       # - CEB_TRUST_PROXY=1   # derrière un reverse proxy : IP du client lue dans X-Forwarded-For (fail2ban)
       # - CEB_DPI=125         # résolution des pages (plus haut = plus net, plus lourd)
     restart: unless-stopped

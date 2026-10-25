@@ -12,6 +12,7 @@ import ipaddress
 import json
 import secrets
 import mimetypes
+import smtplib
 import os
 import re
 import socket
@@ -22,6 +23,8 @@ import sys
 import threading
 import time
 import urllib.parse
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -49,6 +52,15 @@ TLS_CERT = os.environ.get("CEB_TLS_CERT", os.path.join(TLS_DIR, "cert.pem"))
 TLS_KEY = os.environ.get("CEB_TLS_KEY", os.path.join(TLS_DIR, "key.pem"))
 TLS_SAN = os.environ.get("CEB_TLS_SAN", "")  # ex. « IP:192.168.1.10,DNS:ceb.maison.be »
 TLS_DAYS = 825  # durée maximale acceptée par iOS / macOS
+# notifications par e-mail (création d'une famille) — désactivées si CEB_NOTIFY_TO ou CEB_SMTP_HOST est vide
+NOTIFY_TO = [a.strip() for a in os.environ.get("CEB_NOTIFY_TO", "").split(",") if a.strip()]
+SMTP_HOST = os.environ.get("CEB_SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("CEB_SMTP_PORT", "587") or 587)
+SMTP_TLS = os.environ.get("CEB_SMTP_TLS", "starttls").lower()  # starttls | ssl | none
+SMTP_USER = os.environ.get("CEB_SMTP_USER", "")
+SMTP_PASS = os.environ.get("CEB_SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("CEB_SMTP_FROM", "") or SMTP_USER or "revision-ceb@localhost"
+PUBLIC_URL = os.environ.get("CEB_PUBLIC_URL", "")
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("image/svg+xml", ".svg")
@@ -615,6 +627,7 @@ class Handler(BaseHTTPRequestHandler):
                 aid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
                               (name, code_hash(np_), "admin", time.time()))
                 execute("UPDATE profiles SET family=? WHERE family IS NULL", (aid,))
+                notify_family(name, "admin", "premier accès à l'espace Parents", self.client_ip())
                 return self.send_json({"token": new_parent_token(aid), "parent": parent_info(aid)})
             if act == "login" and method == "POST":
                 if not rows("SELECT id FROM parents LIMIT 1"):
@@ -677,6 +690,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
                     nid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
                                   (name, code_hash(np_), "parent", time.time()))
+                    notify_family(name, "parent", p["name"], self.client_ip())
                     return self.send_json(parent_info(nid), 201)
             tid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             if tid is None or not rows("SELECT id FROM parents WHERE id=?", (tid,)):
@@ -954,6 +968,51 @@ class Handler(BaseHTTPRequestHandler):
         return self.error(404, "route inconnue")
 
 
+# ------------------------------------------------------------------ notifications e-mail
+def send_mail(subject, body):
+    """Envoi en arrière-plan : une panne du serveur de messagerie ne bloque jamais le site."""
+    if not NOTIFY_TO or not SMTP_HOST:
+        return False
+    msg = EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = f"Révision CEB <{SMTP_FROM}>", ", ".join(NOTIFY_TO), subject
+    msg["Date"], msg["Message-ID"] = formatdate(localtime=True), make_msgid(domain=SMTP_FROM.split("@")[-1])
+    msg.set_content(body)
+
+    def work():
+        try:
+            ctx = ssl.create_default_context()
+            if SMTP_TLS == "ssl":
+                smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=ctx)
+            else:
+                smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+                if SMTP_TLS == "starttls":
+                    smtp.starttls(context=ctx)
+            with smtp:
+                if SMTP_USER:
+                    smtp.login(SMTP_USER, SMTP_PASS)
+                smtp.send_message(msg)
+            print(f"[mail] envoyé à {', '.join(NOTIFY_TO)} : {subject}", flush=True)
+        except Exception as e:
+            print(f"[mail] échec de l'envoi « {subject} » : {e!r}", flush=True)
+
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def notify_family(name, role, by, ip):
+    n = rows("SELECT COUNT(*) AS n FROM parents")[0]["n"]
+    what = "Compte administrateur créé" if role == "admin" else "Nouvelle famille"
+    send_mail(f"[Révision CEB] {what} : {name}",
+              f"{what} sur le site Révision CEB.\n\n"
+              f"  Famille     : {name}\n"
+              f"  Créée par   : {by}\n"
+              f"  Date        : {time.strftime('%d/%m/%Y à %H:%M')}\n"
+              f"  Adresse IP  : {ip}\n"
+              f"  Familles    : {n} au total\n"
+              + (f"\nEspace Parents : {PUBLIC_URL.rstrip('/')}/#/parent/familles\n" if PUBLIC_URL else "")
+              + "\n-- \nMessage automatique, ne pas répondre.\n")
+
+
 # ------------------------------------------------------------------ HTTPS (certificat autosigné)
 class Server(ThreadingHTTPServer):
     daemon_threads = True
@@ -1002,6 +1061,8 @@ def main():
     srv = Server(("0.0.0.0", PORT), Handler)
     print(f"[web] Révision CEB disponible sur http://0.0.0.0:{PORT}  (PDF : {PDF_DIR}, données : {DATA_DIR})",
           flush=True)
+    print(f"[mail] notifications vers {', '.join(NOTIFY_TO)} via {SMTP_HOST}:{SMTP_PORT} ({SMTP_TLS})"
+          if NOTIFY_TO and SMTP_HOST else "[mail] notifications désactivées (CEB_NOTIFY_TO / CEB_SMTP_HOST)", flush=True)
     if HTTPS_PORT:
         try:
             tls = https_server()
