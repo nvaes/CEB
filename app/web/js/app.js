@@ -343,7 +343,7 @@
           <button data-k="del" aria-label="Effacer">⌫</button><button data-d="0">0</button><button data-k="ok" class="ok" aria-label="Valider">✓</button></div>
         <button class="btn ghost" data-k="cancel">Annuler</button></div>`;
       document.body.appendChild(bg);
-      const draw = () => { $(".code-dots", bg).innerHTML = Array.from({ length: Math.max(exact || 4, val.length) }, (_, i) => `<i class="${i < val.length ? "on" : ""}"></i>`).join(""); };
+      const draw = () => { $(".code-dots", bg).innerHTML = Array.from({ length: Math.max(exact || CODE_LEN, val.length) }, (_, i) => `<i class="${i < val.length ? "on" : ""}"></i>`).join(""); };
       const close = (v) => { document.removeEventListener("keydown", key); bg.remove(); resolve(v); };
       const press = (k) => {
         if (k === "del") val = val.slice(0, -1);
