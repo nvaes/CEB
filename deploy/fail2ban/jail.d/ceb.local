@@ -1,0 +1,27 @@
+# Révision CEB — installé par deploy/fail2ban/install.sh (les valeurs @…@ y sont remplacées)
+[DEFAULT]
+# adresses jamais bloquées : localhost + passerelle Docker (connexions IPv6 relayées par docker-proxy)
+ignoreip = 127.0.0.1/8 ::1 @DOCKER_GW@ @EXTRA_IGNORE@
+# récidive : chaque nouveau blocage dure plus longtemps (max 1 semaine)
+bantime.increment = true
+bantime.maxtime = 1w
+
+[ceb-auth]
+enabled  = true
+filter   = ceb-auth
+logpath  = @LOGPATH@
+backend  = polling
+maxretry = 10
+findtime = 10m
+bantime  = 1h
+# le port publié par Docker ne passe pas par INPUT : on bloque dans DOCKER-USER (IPv4 et IPv6),
+# et dans INPUT pour les connexions relayées par docker-proxy
+action   = iptables-multiport[name=ceb, port="8080", protocol=tcp, chain=DOCKER-USER]
+           iptables-multiport[name=ceb-in, port="8080", protocol=tcp, chain=INPUT]
+
+[sshd]
+enabled  = true
+backend  = systemd
+maxretry = 5
+findtime = 10m
+bantime  = 1h

@@ -329,7 +329,8 @@
     $("[data-new]").addEventListener("click", () => editProfile());
   }
   /* --- codes secrets des enfants */
-  function askCode({ title, subtitle = "", avatar = "🔒", error = "", maxLen = 6 }) {
+  function askCode({ title, subtitle = "", avatar = "🔒", error = "", maxLen = 6, exact = 0 }) {
+    if (exact) maxLen = exact;
     return new Promise((resolve) => {
       let val = "";
       const bg = document.createElement("div"); bg.className = "modal-bg";
@@ -342,13 +343,13 @@
           <button data-k="del" aria-label="Effacer">⌫</button><button data-d="0">0</button><button data-k="ok" class="ok" aria-label="Valider">✓</button></div>
         <button class="btn ghost" data-k="cancel">Annuler</button></div>`;
       document.body.appendChild(bg);
-      const draw = () => { $(".code-dots", bg).innerHTML = Array.from({ length: Math.max(4, val.length) }, (_, i) => `<i class="${i < val.length ? "on" : ""}"></i>`).join(""); };
+      const draw = () => { $(".code-dots", bg).innerHTML = Array.from({ length: Math.max(exact || 4, val.length) }, (_, i) => `<i class="${i < val.length ? "on" : ""}"></i>`).join(""); };
       const close = (v) => { document.removeEventListener("keydown", key); bg.remove(); resolve(v); };
       const press = (k) => {
         if (k === "del") val = val.slice(0, -1);
-        else if (k === "ok") { if (val.length >= 4) return close(val); $(".code-err", bg).textContent = "Au moins 4 chiffres"; }
+        else if (k === "ok") { if (exact ? val.length === exact : val.length >= 4) return close(val); $(".code-err", bg).textContent = exact ? `Le code doit contenir ${exact} chiffres` : "Au moins 4 chiffres"; }
         else if (k === "cancel") return close(null);
-        else if (/^\d$/.test(k) && val.length < maxLen) val += k;
+        else if (/^\d$/.test(k) && val.length < maxLen) { val += k; if (exact && val.length === exact) { draw(); return setTimeout(() => close(val), 150); } }
         draw();
       };
       const key = (e) => { if (/^\d$/.test(e.key)) press(e.key); else if (e.key === "Backspace") press("del"); else if (e.key === "Enter") press("ok"); else if (e.key === "Escape") press("cancel"); };
@@ -357,11 +358,21 @@
       draw();
     });
   }
+  const CODE_LEN = 6;  // longueur de tout nouveau code (enfant ou parent)
+  function info(title, text, avatar = "ℹ️") {
+    return new Promise((resolve) => {
+      const bg = document.createElement("div"); bg.className = "modal-bg";
+      bg.innerHTML = `<div class="card modal stack" style="width:min(380px,100%);text-align:center"><div class="avatar big" style="margin:0 auto">${esc(avatar)}</div>
+        <h2 style="margin:0">${esc(title)}</h2><p class="small">${esc(text)}</p><button class="btn primary" data-ok>D'accord</button></div>`;
+      document.body.appendChild(bg);
+      bg.querySelector("[data-ok]").addEventListener("click", () => { bg.remove(); resolve(); });
+    });
+  }
   async function chooseNewCode(p, intro) {
     for (let err = ""; ;) {
-      const a = await askCode({ title: intro || "Choisis ton code secret", subtitle: "4 à 6 chiffres, à garder pour toi", avatar: p.avatar, error: err });
+      const a = await askCode({ title: intro || "Choisis ton code secret", subtitle: "6 chiffres, à garder pour toi", avatar: p.avatar, error: err, exact: CODE_LEN });
       if (a === null) return null;
-      const b = await askCode({ title: "Confirme ton code", subtitle: "Tape-le une deuxième fois", avatar: p.avatar });
+      const b = await askCode({ title: "Confirme ton code", subtitle: "Tape-le une deuxième fois", avatar: p.avatar, exact: CODE_LEN });
       if (b === null) return null;
       if (a === b) return a;
       err = "Les deux codes sont différents, recommence.";
@@ -386,9 +397,10 @@
         await logoutCurrent();
         store.set("token", r.token);
         if (r.needs_code) {
+          if (r.upgrade) await info("Nouveau code à 6 chiffres", "Pour plus de sécurité, les codes ont maintenant 6 chiffres. Choisis ton nouveau code secret.", p.avatar);
           const nc = await chooseNewCode(p, p.has_code ? "Choisis un nouveau code" : "Crée ton code secret");
           if (nc === null) { store.set("token", null); return; }
-          await api(`profiles/${id}/setcode`, { method: "POST", body: { code: nc } });
+          await api(`profiles/${id}/setcode`, { method: "POST", body: { code: nc, old: code } });
           p.has_code = true; toast("Code enregistré 🔒");
         }
         await selectProfile(id); location.hash = "#/"; return route();
@@ -1021,9 +1033,9 @@
     if (!st.pin) {
       // premier accès : création obligatoire du code parent
       for (let err = ""; ;) {
-        const a = await askCode({ title: "Crée le code administrateur", subtitle: (reason ? reason + " " : "") + "Premier compte parent : il gère les fichiers CEB et les familles. 4 à 8 chiffres.", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
+        const a = await askCode({ title: "Crée le code administrateur", subtitle: (reason ? reason + " " : "") + "Premier compte parent : il gère les fichiers CEB et les familles. 6 chiffres.", avatar: "👨‍👩‍👧", error: err, exact: CODE_LEN });
         if (a === null) return false;
-        const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", maxLen: 8 });
+        const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", exact: CODE_LEN });
         if (b === null) return false;
         if (a !== b) { err = "Les deux codes sont différents."; continue; }
         try { const r = await api("parent/setup", { method: "POST", body: { new_pin: a } }); S.ptoken = r.token; S.parent = r.parent; toast("Code administrateur créé 🔒"); return true; } catch (e) { err = e.message; }
@@ -1032,14 +1044,25 @@
     for (let err = ""; ;) {
       const pin = await askCode({ title: "Espace Parents", subtitle: reason || "Entre le code parent", avatar: "👨‍👩‍👧", error: err, maxLen: 8 });
       if (pin === null) return false;
-      try { const r = await api("parent/login", { method: "POST", body: { pin } }); S.ptoken = r.token; S.parent = r.parent; return true; } catch (e) { err = e.message; }
+      let r; try { r = await api("parent/login", { method: "POST", body: { pin } }); } catch (e) { err = e.message; continue; }
+      S.ptoken = r.token; S.parent = r.parent;
+      if (!r.upgrade) return true;
+      // ancien code parent (4, 5, 7 ou 8 chiffres) : passage obligatoire à 6 chiffres
+      for (let e2 = "Les codes ont maintenant 6 chiffres : choisis ton nouveau code parent."; ;) {
+        const a = await askCode({ title: "Nouveau code parent", subtitle: "6 chiffres", avatar: "👨‍👩‍👧", error: e2, exact: CODE_LEN });
+        if (a === null) { await parentLock(); return false; }
+        const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", exact: CODE_LEN });
+        if (b === null) { await parentLock(); return false; }
+        if (a !== b) { e2 = "Les deux codes sont différents."; continue; }
+        try { await api("settings", { method: "PUT", body: { new_pin: a } }); toast("Nouveau code parent enregistré 🔒"); return true; } catch (e) { e2 = e.message; }
+      }
     }
   }
   async function parentLock() {
     if (S.ptoken) await api("parent/logout", { method: "POST", body: {} }).catch(() => {});
     S.ptoken = null; S.parent = null; location.hash = S.profile ? "#/" : "#/profils";
   }
-  const PARENT_TABS = [["progres", "📈 Progrès"], ["enfants", "👨‍👩‍👧 Enfants"], ["fichiers", "📤 Fichiers CEB", "admin"], ["familles", "👪 Familles", "admin"], ["reglages", "⚙️ Réglages"]];
+  const PARENT_TABS = [["progres", "📈 Progrès"], ["enfants", "👨‍👩‍👧 Enfants"], ["fichiers", "📤 Fichiers CEB", "admin"], ["familles", "👪 Familles", "admin"], ["securite", "🛡️ Sécurité", "admin"], ["reglages", "⚙️ Réglages"]];
   const isAdmin = () => S.parent && S.parent.role === "admin";
   function parentShell(tab, inner) {
     return `<div class="spread"><div><h1 style="margin:0">Espace Parents</h1><div class="small muted">👪 ${esc(S.parent?.name || "")}${isAdmin() ? " · administrateur" : ""}</div></div><button class="btn sm" data-plock>🔒 Verrouiller</button></div>
@@ -1055,6 +1078,7 @@
     if (isAdmin()) S.families = await api("parents"); else S.families = [S.parent];
     if (tab === "fichiers" && isAdmin()) return viewFiles();
     if (tab === "familles" && isAdmin()) return viewParentFamilies();
+    if (tab === "securite" && isAdmin()) return viewParentSecurity();
     if (tab === "enfants") return viewParentChildren();
     if (tab === "reglages") return viewParentSettings();
     return viewParentProgress(arg);
@@ -1109,8 +1133,8 @@
       <p class="tiny" style="margin:0">Donne ensuite son code au parent concerné : il associe ses tablettes à sa famille (écran d'accueil → « Associer à ma famille ») et ajoute ses enfants depuis son espace Parents.</p></div>`), true);
     bindShell();
     const newPin = async (title) => {
-      const a = await askCode({ title, subtitle: "Code parent : 4 à 8 chiffres, différent de celui des autres familles", avatar: "👪", maxLen: 8 }); if (a === null) return null;
-      const b = await askCode({ title: "Confirme le code", subtitle: "Tape-le une deuxième fois", avatar: "👪", maxLen: 8 }); if (b === null) return null;
+      const a = await askCode({ title, subtitle: "Code parent : 6 chiffres, différent de celui des autres familles", avatar: "👪", exact: CODE_LEN }); if (a === null) return null;
+      const b = await askCode({ title: "Confirme le code", subtitle: "Tape-le une deuxième fois", avatar: "👪", exact: CODE_LEN }); if (b === null) return null;
       if (a !== b) { toast("Les deux codes sont différents"); return null; }
       return a;
     };
@@ -1133,6 +1157,49 @@
       try { await api(`parents/${f.id}`, { method: "DELETE", body: {} }); viewParent("familles"); } catch (e) { toast(e.message, 3500); }
     }));
   }
+  /* --- sécurité : état de fail2ban (écrit par l'hôte) et journal des connexions */
+  const AUTH_KIND = { parent: "Code parent", "parent-pin": "Code parent", "parent-blocked": "Parent (bloqué)", child: "Code enfant", "child-blocked": "Enfant (bloqué)", "child-oldcode": "Ancien code enfant" };
+  async function viewParentSecurity() {
+    const r = await api("security");
+    const f = r.fail2ban; const stale = !f || r.age === null || r.age > 180;
+    const kidName = (who) => { const m = /^#(\d+)$/.exec(who || ""); const k = m && S.pchildren.find((c) => c.id === +m[1]); return k ? `${k.avatar} ${k.name}` : (who === "-" ? "" : who); };
+    const jails = (f && f.jails) || [];
+    const banned = jails.flatMap((j) => (j.banned || []).map((b) => ({ ...b, jail: j.name })));
+    const pendingIps = new Set((r.pending || []).map((p) => p.ip));
+    render(parentShell("securite", `<h2>Sécurité</h2>
+      <p class="muted">Chaque code incorrect est noté avec l'adresse IP de l'appareil. <b>fail2ban</b>, sur le serveur, bloque une adresse qui se trompe trop souvent (essais de codes au hasard).</p>
+      <div class="grid g3">
+        <div class="card stack"><div class="small muted">Protection fail2ban</div>
+          <div style="font-size:1.4rem;font-weight:800;color:${stale ? "var(--ko)" : "var(--ok)"}">${!f ? "⚠️ Aucune donnée" : stale ? "⚠️ État non mis à jour" : f.running ? "✅ Active" : "❌ Arrêtée"}</div>
+          <div class="tiny">${f ? `Relevé ${r.age < 90 ? "il y a " + r.age + " s" : "le " + esc(f.updated)}${f.version ? " · fail2ban " + esc(f.version) : ""}` : "Le service de relevé n'a pas encore écrit d'état (voir deploy/fail2ban)."}</div></div>
+        <div class="card stack"><div class="small muted">Dernières 24 h</div>
+          <div style="font-size:1.4rem;font-weight:800">${r.day.fail} <span class="small" style="color:var(--ko)">échec${r.day.fail > 1 ? "s" : ""}</span> · ${r.day.ok} <span class="small" style="color:var(--ok)">connexion${r.day.ok > 1 ? "s" : ""}</span></div>
+          <div class="tiny">${r.day.top.length ? "Le plus d'échecs : " + r.day.top.slice(0, 3).map(([ip, n]) => `${esc(ip)} (${n})`).join(", ") : "Aucun échec."}</div></div>
+        <div class="card stack"><div class="small muted">Adresses bloquées</div>
+          <div style="font-size:1.4rem;font-weight:800;color:${banned.length ? "var(--ko)" : "inherit"}">${banned.length}</div>
+          <div class="tiny">${jails.map((j) => `${esc(j.name)} : ${j.currently_failed ?? 0} en observation, ${j.total_banned ?? 0} blocage${(j.total_banned ?? 0) > 1 ? "s" : ""} au total`).join("<br>") || "—"}</div></div>
+      </div>
+      <div class="section-title"><h2>Adresses bloquées</h2><button class="btn sm" id="secref">🔄 Actualiser</button></div>
+      <div class="card table-wrap"><table><thead><tr><th>Adresse IP</th><th>Protection</th><th>Bloquée depuis</th><th>Jusqu'au</th><th></th></tr></thead><tbody>
+        ${banned.map((b) => `<tr><td><b>${esc(b.ip)}</b></td><td class="small">${esc(b.jail)}</td><td class="small">${esc(b.since || "")}</td><td class="small">${esc(b.until || "")}</td>
+          <td>${pendingIps.has(b.ip) ? `<span class="chip">déblocage demandé…</span>` : `<button class="btn sm" data-unban="${esc(b.ip)}">Débloquer</button>`}</td></tr>`).join("") || `<tr><td colspan="5" class="muted small">Aucune adresse bloquée.</td></tr>`}
+      </tbody></table></div>
+      ${jails.length ? `<p class="tiny">Règles : ${jails.map((j) => `${esc(j.name)} — blocage après ${esc(j.maxretry ?? "?")} échecs en ${esc(j.findtime ?? "?")} s, pendant ${esc(j.bantime ?? "?")} s (plus long en cas de récidive)`).join(" · ")}.</p>` : ""}
+      ${(f && f.events || []).length ? `<div class="section-title"><h2>Activité fail2ban</h2></div>
+      <div class="card table-wrap"><table><thead><tr><th>Date</th><th>Protection</th><th>Action</th><th>Adresse IP</th></tr></thead><tbody>
+        ${f.events.slice(0, 40).map((e) => `<tr><td class="small">${esc(e.ts)}</td><td class="small">${esc(e.jail)}</td><td><b style="color:${e.action === "Ban" ? "var(--ko)" : e.action === "Unban" ? "var(--ok)" : "var(--mid)"}">${{ Ban: "Bloquée", Unban: "Débloquée", Found: "Échec repéré", Restore: "Blocage restauré" }[e.action] || esc(e.action)}</b></td><td>${esc(e.ip)}</td></tr>`).join("")}
+      </tbody></table></div>` : ""}
+      <div class="section-title"><h2>Journal des connexions</h2></div>
+      <div class="card table-wrap"><table><thead><tr><th>Date</th><th>Résultat</th><th>Type</th><th>Compte</th><th>Adresse IP</th></tr></thead><tbody>
+        ${r.events.slice(0, 100).map((e) => `<tr><td class="small">${esc(e.ts)}</td><td><b style="color:${e.ok ? "var(--ok)" : "var(--ko)"}">${e.ok ? "✔ réussi" : "✗ échec"}</b></td><td class="small">${esc(AUTH_KIND[e.kind] || e.kind)}</td><td class="small">${esc(kidName(e.who))}</td><td class="small">${esc(e.ip)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted small">Aucune connexion enregistrée.</td></tr>`}
+      </tbody></table></div>`), true);
+    bindShell();
+    $("#secref").addEventListener("click", () => viewParentSecurity());
+    $$("[data-unban]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm(`Débloquer l'adresse ${b.dataset.unban} ?`)) return;
+      try { await api("security/unban", { method: "POST", body: { ip: b.dataset.unban } }); toast("Déblocage demandé : effectif dans quelques secondes", 3000); setTimeout(() => location.hash === "#/parent/securite" && viewParentSecurity(), 4000); viewParentSecurity(); } catch (e) { toast(e.message); }
+    }));
+  }
   async function viewParentSettings() {
     const st = await api("status");
     const theme = store.get("theme", "auto");
@@ -1152,7 +1219,7 @@
         <div class="card stack"><h2>Conseils</h2>
           <ul class="small" style="margin:0;padding-left:18px">
             <li>Les questions viennent des épreuves officielles du CEB (Fédération Wallonie-Bruxelles). L'enfant répond à l'écran (ou sur papier) ; les cases sont corrigées automatiquement quand c'est possible, le reste se compare à la correction officielle.</li>
-            <li>Chaque enfant a son code secret (4 à 6 chiffres). En cas d'oubli : onglet Enfants → « Réinitialiser le code ».</li>
+            <li>Chaque enfant a son code secret (6 chiffres). En cas d'oubli : onglet Enfants → « Réinitialiser le code ».</li>
             <li>L'espace Parents se verrouille automatiquement après quelques heures, au rechargement de la page ou avec le bouton « Verrouiller ».</li>
             <li>Pour « Écouter », la lecture se fait par la voix de synthèse de l'appareil ; un adulte peut aussi lire le texte affiché.</li>
             <li>Les données restent sur ton serveur local (aucun compte, aucun envoi externe).</li></ul></div>
@@ -1160,8 +1227,8 @@
     bindShell();
     $$("#theme button").forEach((b) => b.addEventListener("click", () => { store.set("theme", b.dataset.t); applyTheme(); $$("#theme button").forEach((x) => x.classList.toggle("on", x === b)); }));
     $("#setpin").addEventListener("click", async () => {
-      const a = await askCode({ title: "Nouveau code parent", subtitle: "4 à 8 chiffres", avatar: "👨‍👩‍👧", maxLen: 8 }); if (a === null) return;
-      const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", maxLen: 8 }); if (b === null) return;
+      const a = await askCode({ title: "Nouveau code parent", subtitle: "6 chiffres", avatar: "👨‍👩‍👧", exact: CODE_LEN }); if (a === null) return;
+      const b = await askCode({ title: "Confirme le code parent", subtitle: "Tape-le une deuxième fois", avatar: "👨‍👩‍👧", exact: CODE_LEN }); if (b === null) return;
       if (a !== b) return toast("Les deux codes sont différents");
       try { await api("settings", { method: "PUT", body: { new_pin: a } }); toast("Code parent modifié"); } catch (e) { toast(e.message); }
     });

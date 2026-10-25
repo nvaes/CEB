@@ -8,6 +8,7 @@ Serveur du site « Révision CEB » — bibliothèque standard Python uniquement
 """
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
 import mimetypes
@@ -33,6 +34,12 @@ UPLOAD_DIR = os.path.join(DATA_DIR, "pdf")
 MAX_UPLOAD = int(os.environ.get("CEB_MAX_UPLOAD_MB", "250")) * 1024 * 1024
 KINDS = {"questionnaire": "questionnaire", "correction": "correction", "portfolio": "portfolio"}
 CATALOG = os.path.join(DATA_DIR, "catalog.json")
+# sécurité : journal des authentifications (lu par fail2ban sur l'hôte) et état fail2ban (écrit par l'hôte)
+SEC_DIR = os.path.join(DATA_DIR, "security")
+AUTH_LOG = os.path.join(SEC_DIR, "auth.log")
+F2B_STATUS = os.path.join(SEC_DIR, "fail2ban.json")
+F2B_UNBAN = os.path.join(SEC_DIR, "unban.json")
+TRUST_PROXY = os.environ.get("CEB_TRUST_PROXY", "").lower() in ("1", "true", "yes", "oui")
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("image/svg+xml", ".svg")
@@ -129,6 +136,7 @@ def db():
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(SEC_DIR, exist_ok=True)
     with db() as con:
         con.executescript(SCHEMA)
         cols = [r[1] for r in con.execute("PRAGMA table_info(profiles)")]
@@ -189,7 +197,7 @@ def pdf_path(name):
 
 
 # ------------------------------------------------------------------ codes enfants
-CODE_RE = re.compile(r"\d{4,6}")
+CODE_RE = re.compile(r"\d{6}")  # tout nouveau code (enfant ou parent) : exactement 6 chiffres
 TOKEN_DAYS = int(os.environ.get("CEB_TOKEN_DAYS", "60"))
 _fails = {}  # profil -> (nombre d'échecs, verrouillé jusqu'à)
 PUBLIC_PROFILE = "id, name, avatar, color, created, (code IS NOT NULL AND code <> '') AS has_code"
@@ -243,7 +251,8 @@ def pin_hash(pin):
 
 
 # ------------------------------------------------------------------ comptes parents (familles)
-PIN_RE = re.compile(r"\d{4,8}")
+PIN_RE = CODE_RE
+CODE_MSG = "le code doit contenir exactement 6 chiffres"
 
 
 def verify_pin(pin, stored):
@@ -282,6 +291,79 @@ def token_parent(tok):
         return None
     r = rows("SELECT parent FROM tokens WHERE token=?", (tok,))
     return parent_info(r[0]["parent"]) if r and r[0]["parent"] else None
+
+
+# ------------------------------------------------------------------ journal de sécurité (fail2ban)
+_log_lock = threading.Lock()
+AUTH_RE = re.compile(r"^(\S+ \S+) CEB-AUTH (OK|FAIL) ip=(\S+) kind=(\S+) who=(.*)$")
+
+
+def auth_event(ok, ip, kind, who=""):
+    """Une ligne par tentative ; fail2ban (sur l'hôte) bannit les IP qui accumulent les FAIL."""
+    who = re.sub(r"[^\w .@#'-]", "?", str(who or "-"))[:60]
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} CEB-AUTH {'OK' if ok else 'FAIL'} ip={ip} kind={kind} who={who}\n"
+    if not ok:
+        print("[auth] " + line, end="", flush=True)
+    try:
+        with _log_lock, open(AUTH_LOG, "a") as f:
+            f.write(line)
+    except OSError as e:  # pragma: no cover
+        print(f"[auth] journal indisponible : {e!r}", flush=True)
+
+
+def tail_lines(path, n=400, block=65536):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - block * 4))
+            return f.read().decode("utf-8", "replace").splitlines()[-n:]
+    except FileNotFoundError:
+        return []
+
+
+def security_report():
+    events = []
+    for line in tail_lines(AUTH_LOG, 2000):
+        m = AUTH_RE.match(line)
+        if m:
+            events.append({"ts": m[1], "ok": m[2] == "OK", "ip": m[3], "kind": m[4], "who": m[5]})
+    since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 86400))
+    day = [e for e in events if e["ts"] >= since]
+    top = {}
+    for e in day:
+        if not e["ok"]:
+            top[e["ip"]] = top.get(e["ip"], 0) + 1
+    f2b, age = None, None
+    try:
+        with open(F2B_STATUS) as f:
+            f2b = json.load(f)
+        age = int(time.time() - os.stat(F2B_STATUS).st_mtime)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(F2B_UNBAN) as f:
+            pending = json.load(f)
+    except (OSError, ValueError):
+        pending = []
+    return {"fail2ban": f2b, "age": age, "events": events[-150:][::-1], "pending": pending,
+            "day": {"fail": sum(not e["ok"] for e in day), "ok": sum(e["ok"] for e in day),
+                    "top": sorted(top.items(), key=lambda kv: -kv[1])[:10]}}
+
+
+def request_unban(ip, by):
+    with _log_lock:
+        try:
+            with open(F2B_UNBAN) as f:
+                pending = json.load(f)
+        except (OSError, ValueError):
+            pending = []
+        if ip not in [p.get("ip") for p in pending]:
+            pending.append({"ip": ip, "ts": time.time(), "by": by})
+        tmp = F2B_UNBAN + ".part"
+        with open(tmp, "w") as f:
+            json.dump(pending, f)
+        os.replace(tmp, F2B_UNBAN)
 
 
 # ------------------------------------------------------------------ HTTP
@@ -339,6 +421,20 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
+    def client_ip(self):
+        ip = self.client_address[0]
+        if TRUST_PROXY and self.headers.get("X-Forwarded-For"):
+            ip = self.headers["X-Forwarded-For"].split(",")[-1].strip()  # ajouté par le proxy de confiance
+        if ip.startswith("::ffff:"):
+            ip = ip[7:]
+        try:
+            return str(ipaddress.ip_address(ip))
+        except ValueError:
+            return "0.0.0.0"
+
+    def auth(self, ok, kind, who=""):
+        auth_event(ok, self.client_ip(), kind, who)
+
     def parent(self):
         """Compte parent de la session (jeton X-Parent-Token ou ?ptoken=), ou None."""
         if not hasattr(self, "_parent"):
@@ -348,7 +444,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def parent_ok(self, data=None):
         """Session parent, ou code parent fourni dans la requête (compatibilité)."""
-        return self.parent() or (find_parent_by_pin(str(data.get("pin") or "")) if data else None)
+        p = self.parent()
+        if p or not data or not data.get("pin"):
+            return p
+        p = find_parent_by_pin(str(data["pin"]))
+        self.auth(bool(p), "parent-pin", p["name"] if p else "")
+        return p
 
     def is_admin(self, data=None):
         p = self.parent_ok(data)
@@ -499,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.error(409, "un code parent existe déjà")
                 np_ = str(data.get("new_pin") or "")
                 if not PIN_RE.fullmatch(np_):
-                    return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                    return self.error(400, CODE_MSG)
                 name = (str(data.get("name") or "").strip() or "Administrateur")[:40]
                 aid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
                               (name, code_hash(np_), "admin", time.time()))
@@ -510,12 +611,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.error(412, "aucun code parent défini")
                 n, until = _fails.get("parent", (0, 0))
                 if until > time.time():
+                    self.auth(False, "parent-blocked")
                     return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
-                p = find_parent_by_pin(str(data.get("pin") or ""))
+                pin = str(data.get("pin") or "")
+                p = find_parent_by_pin(pin)
+                self.auth(bool(p), "parent", p["name"] if p else "")
                 if p:
                     _fails.pop("parent", None)
+                    # ancien code (autre que 6 chiffres) : accepté, mais il faut en choisir un nouveau
                     return self.send_json({"token": new_parent_token(p["id"]), "parent": parent_info(p["id"]),
-                                           "hours": PARENT_HOURS})
+                                           "hours": PARENT_HOURS, "upgrade": not CODE_RE.fullmatch(pin)})
                 n += 1
                 _fails["parent"] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
                 return self.error(403, "code parent incorrect")
@@ -557,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not name:
                         return self.error(400, "nom de la famille requis")
                     if not PIN_RE.fullmatch(np_):
-                        return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                        return self.error(400, CODE_MSG)
                     if find_parent_by_pin(np_):
                         return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
                     nid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
@@ -574,7 +679,7 @@ class Handler(BaseHTTPRequestHandler):
                 if data.get("pin") is not None and data.get("pin") != "":
                     np_ = str(data["pin"])
                     if not PIN_RE.fullmatch(np_):
-                        return self.error(400, "le code parent doit contenir 4 à 8 chiffres")
+                        return self.error(400, CODE_MSG)
                     other = find_parent_by_pin(np_)
                     if other and other["id"] != tid:
                         return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
@@ -611,6 +716,19 @@ class Handler(BaseHTTPRequestHandler):
                 execute("DELETE FROM devices WHERE key=?", (self.headers.get("X-Family-Key", ""),))
                 return self.send_json({"ok": True})
 
+        if head == "security":
+            if not self.is_admin():
+                return self.error(403, "réservé à l'administrateur")
+            if len(parts) == 1 and method == "GET":
+                return self.send_json(security_report())
+            if len(parts) == 2 and parts[1] == "unban" and method == "POST":
+                try:
+                    ip = str(ipaddress.ip_address(str(data.get("ip") or "").strip()))
+                except ValueError:
+                    return self.error(400, "adresse IP invalide")
+                request_unban(ip, self.parent()["name"])
+                return self.send_json({"ok": True, "ip": ip})
+
         if head == "rebuild" and method == "POST":
             if not self.is_admin(data):
                 return self.error(403, "réservé à l'administrateur")
@@ -627,7 +745,7 @@ class Handler(BaseHTTPRequestHandler):
                 if data.get("new_pin"):
                     np_ = str(data["new_pin"])
                     if not PIN_RE.fullmatch(np_):
-                        return self.error(400, "le code doit contenir 4 à 8 chiffres")
+                        return self.error(400, CODE_MSG)
                     other = find_parent_by_pin(np_)
                     if other and other["id"] != p["id"]:
                         return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
@@ -684,7 +802,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not name:
                         return self.error(400, "prénom requis")
                     if not CODE_RE.fullmatch(code):
-                        return self.error(400, "le code de l'enfant doit contenir 4 à 6 chiffres")
+                        return self.error(400, "le code de l'enfant doit contenir exactement 6 chiffres")
                     fam = p["id"]
                     if p["role"] == "admin" and str(data.get("family") or "").isdigit() and \
                             rows("SELECT id FROM parents WHERE id=?", (int(data["family"]),)):
@@ -704,14 +822,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self.error(403, "ce profil n'appartient pas à la famille de cette tablette")
                 n, until = _fails.get(pid, (0, 0))
                 if until > time.time():
+                    self.auth(False, "child-blocked", f"#{pid}")
                     return self.error(429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s")
                 code = str(data.get("code") or "")
                 if not prof["code"]:
                     # code réinitialisé par un parent : accès accordé, l'enfant doit choisir un nouveau code
                     return self.send_json({"token": new_token(pid), "needs_code": True})
-                if code_ok(code, prof["code"]):
+                ok = code_ok(code, prof["code"])
+                self.auth(ok, "child", f"#{pid}")
+                if ok:
                     _fails.pop(pid, None)
-                    return self.send_json({"token": new_token(pid), "needs_code": False})
+                    up = not CODE_RE.fullmatch(code)  # ancien code à 4 ou 5 chiffres : à remplacer
+                    return self.send_json({"token": new_token(pid), "needs_code": up, "upgrade": up})
                 n += 1
                 _fails[pid] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
                 return self.error(403, "code incorrect" + (" — accès bloqué 30 s" if n >= 5 else ""))
@@ -733,8 +855,9 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "setcode" and method == "POST":
                 code = str(data.get("code") or "")
                 if not CODE_RE.fullmatch(code):
-                    return self.error(400, "le code doit contenir 4 à 6 chiffres")
+                    return self.error(400, CODE_MSG)
                 if prof["code"] and not code_ok(str(data.get("old") or ""), prof["code"]):
+                    self.auth(False, "child-oldcode", f"#{pid}")
                     return self.error(403, "ancien code incorrect")
                 execute("UPDATE profiles SET code=? WHERE id=?", (code_hash(code), pid))
                 return self.send_json({"ok": True})

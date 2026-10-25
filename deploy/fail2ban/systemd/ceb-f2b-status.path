@@ -1,0 +1,9 @@
+[Unit]
+Description=Révision CEB : déblocage demandé depuis l'onglet Sécurité
+
+[Path]
+PathExists=@SEC_DIR@/unban.json
+Unit=ceb-f2b-status.service
+
+[Install]
+WantedBy=paths.target

@@ -318,3 +318,6 @@ pre.log { white-space: pre-wrap; font-size: .78rem; background: var(--paper-2); 
   font-weight: 800; font-family: var(--font-round); cursor: pointer; color: var(--ink); }
 .keypad button:active { transform: scale(.97); }
 .keypad button.ok { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.ia-inks { display: inline-flex; gap: 5px; align-items: center; margin-left: 6px; padding-left: 8px; border-left: 1px solid var(--line); }
+.ia-ink { width: 28px; height: 28px; min-height: 0; padding: 0; border-radius: 50%; border: 2px solid var(--line); cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .15); }
+.ia-ink.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), inset 0 0 0 1px rgba(0, 0, 0, .15); }

@@ -1,14 +1,21 @@
 /* Réponses interactives sur les pages scannées :
    - cases à cocher détectées dans le PDF (clic = croix) ;
    - lignes de réponse détectées (champ de saisie posé sur la ligne) ;
-   - outils libres : croix, texte, crayon (pour les tableaux, schémas, tracés…).
+   - outils libres : croix, texte, crayon (pour les tableaux, schémas, tracés…) ;
+   - couleur d'encre au choix (rouge, vert, bleu, noir, blanc), mémorisée par élément.
    Les positions sont exprimées en fractions de page (x, y), indépendantes de l'écran. */
 (function () {
   "use strict";
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const IA = { tool: "none", listeners: [] };
+  IA.INKS = [["#2547d0", "Bleu"], ["#d62828", "Rouge"], ["#1f9d45", "Vert"], ["#111111", "Noir"], ["#ffffff", "Blanc"]];
+  const INK0 = IA.INKS[0][0];
+  const ink = (c) => (IA.INKS.some((k) => k[0] === c) ? c : INK0);  // couleur stockée → couleur sûre (anciennes réponses : bleu)
+  try { IA.color = ink(JSON.parse(localStorage.getItem("ceb:ink"))); } catch (e) { IA.color = INK0; }
+  const inkStyle = (c) => `color:${ink(c)};` + (ink(c) === "#ffffff" ? "text-shadow:0 0 1px #000,0 0 2px #0008;" : "");
 
-  IA.empty = () => ({ b: {}, f: {}, m: [], t: [], s: [] });
+  /* a.m = [[p, x, y, couleur]], a.t = [[p, x, y, texte, couleur]], a.s = [[p, [x, y, …], couleur]], a.fc = {ligne: couleur} */
+  IA.empty = () => ({ b: {}, f: {}, m: [], t: [], s: [], fc: {} });
   IA.hasContent = (a) => !!a && (Object.values(a.b || {}).some(Boolean) || Object.values(a.f || {}).some((v) => String(v).trim())
     || (a.m || []).length || (a.t || []).some((x) => String(x[3]).trim()) || (a.s || []).length);
 
@@ -39,12 +46,12 @@
         if (!inSeg(seg, f.p, f.y)) return;
         const h = 0.024;
         html += `<input class="ia-field" data-q="${q.qid}" data-f="${i}" autocomplete="off" spellcheck="false" ${ctx.readonly ? "readonly" : ""}
-          value="${esc(a.f[i] || "")}" style="${pos(seg, f.x, f.y - h + 0.002, f.w, h)}">`;
+          value="${esc(a.f[i] || "")}" style="${pos(seg, f.x, f.y - h + 0.002, f.w, h)}${inkStyle((a.fc || {})[i])}">`;
       });
-      (a.m || []).forEach((m, i) => { if (inSeg(seg, m[0], m[2])) html += `<span class="ia-mark" data-q="${q.qid}" data-m="${i}" style="${pos(seg, m[1], m[2])}">✗</span>`; });
+      (a.m || []).forEach((m, i) => { if (inSeg(seg, m[0], m[2])) html += `<span class="ia-mark" data-q="${q.qid}" data-m="${i}" style="${pos(seg, m[1], m[2])}${inkStyle(m[3])}">✗</span>`; });
       (a.t || []).forEach((t, i) => {
         if (!inSeg(seg, t[0], t[2])) return;
-        html += `<input class="ia-text" data-q="${q.qid}" data-t="${i}" value="${esc(t[3])}" ${ctx.readonly ? "readonly" : ""} style="${pos(seg, t[1], t[2] - 0.012)}">`;
+        html += `<input class="ia-text" data-q="${q.qid}" data-t="${i}" value="${esc(t[3])}" ${ctx.readonly ? "readonly" : ""} style="${pos(seg, t[1], t[2] - 0.012)}${inkStyle(t[4])}">`;
       });
     }
     return html + `<canvas class="ia-draw"></canvas>`;
@@ -56,19 +63,19 @@
     for (const q of ctx.questions) for (const s of q.segs) if (s.p === p && y >= s.y0 && y < s.y1) return q.qid;
     return ctx.questions[0] && ctx.questions[0].qid;
   }
-  function ans(ctx, qid) { if (!ctx.answers[qid]) ctx.answers[qid] = IA.empty(); const a = ctx.answers[qid]; a.m = a.m || []; a.t = a.t || []; a.s = a.s || []; return a; }
+  function ans(ctx, qid) { if (!ctx.answers[qid]) ctx.answers[qid] = IA.empty(); const a = ctx.answers[qid]; a.m = a.m || []; a.t = a.t || []; a.s = a.s || []; a.fc = a.fc || {}; return a; }
 
   function drawCanvas(layer, ctx) {
     const cv = layer.querySelector("canvas.ia-draw"); if (!cv) return;
     const seg = segOf(layer); const r = layer.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1;
     cv.width = Math.max(1, Math.round(r.width * dpr)); cv.height = Math.max(1, Math.round(r.height * dpr));
     const g = cv.getContext("2d"); g.clearRect(0, 0, cv.width, cv.height);
-    g.lineCap = "round"; g.lineJoin = "round"; g.strokeStyle = "#2547d0"; g.lineWidth = Math.max(2, r.width * 0.0035) * dpr;
+    g.lineCap = "round"; g.lineJoin = "round"; g.lineWidth = Math.max(2, r.width * 0.0035) * dpr;
     const H = seg.y1 - seg.y0;
     for (const q of ctx.questions) {
       for (const st of (ctx.answers[q.qid] || {}).s || []) {
         if (st[0] !== seg.p) continue;
-        const pts = st[1]; g.beginPath();
+        const pts = st[1]; g.strokeStyle = ink(st[2]); g.beginPath();
         for (let i = 0; i < pts.length; i += 2) {
           const X = pts[i] * cv.width, Y = ((pts[i + 1] - seg.y0) / H) * cv.height;
           if (i === 0) g.moveTo(X, Y); else g.lineTo(X, Y);
@@ -110,13 +117,13 @@
         ans(ctx, mark.dataset.q).m.splice(+mark.dataset.m, 1); refresh(layer, ctx); onChange(mark.dataset.q); return;
       }
       const pt = point(layer, e); const qid = qidAt(ctx, pt.p, pt.y);
-      if (IA.tool === "x") { ans(ctx, qid).m.push([pt.p, pt.x, pt.y]); refresh(layer, ctx); onChange(qid); }
+      if (IA.tool === "x") { ans(ctx, qid).m.push([pt.p, pt.x, pt.y, IA.color]); refresh(layer, ctx); onChange(qid); }
       else if (IA.tool === "text") {
-        const a = ans(ctx, qid); a.t.push([pt.p, pt.x, pt.y, ""]); refresh(layer, ctx);
+        const a = ans(ctx, qid); a.t.push([pt.p, pt.x, pt.y, "", IA.color]); refresh(layer, ctx);
         const inp = layer.querySelector(`.ia-text[data-q="${qid}"][data-t="${a.t.length - 1}"]`); setTimeout(() => inp && inp.focus(), 10);
       } else if (IA.tool === "pen") {
         e.preventDefault(); layer.setPointerCapture(e.pointerId);
-        drawing = { layer, qid, st: [pt.p, [pt.x, pt.y]] }; ans(ctx, qid).s.push(drawing.st);
+        drawing = { layer, qid, st: [pt.p, [pt.x, pt.y], IA.color] }; ans(ctx, qid).s.push(drawing.st);
       } else if (IA.tool === "erase") {
         // efface le trait le plus proche
         const a = ans(ctx, qid); let best = -1, bd = 0.02;
@@ -135,8 +142,9 @@
     root.addEventListener("pointerup", end); root.addEventListener("pointercancel", end);
     root.addEventListener("input", (e) => {
       const el = e.target;
-      if (el.classList.contains("ia-field")) { ans(ctx, el.dataset.q).f[el.dataset.f] = el.value; onChange(el.dataset.q); }
-      if (el.classList.contains("ia-text")) { const t = ans(ctx, el.dataset.q).t[+el.dataset.t]; if (t) { t[3] = el.value; onChange(el.dataset.q); } }
+      // le texte prend la couleur choisie au moment où on l'écrit
+      if (el.classList.contains("ia-field")) { const a = ans(ctx, el.dataset.q); a.f[el.dataset.f] = el.value; a.fc[el.dataset.f] = IA.color; el.style.cssText += inkStyle(IA.color); onChange(el.dataset.q); }
+      if (el.classList.contains("ia-text")) { const t = ans(ctx, el.dataset.q).t[+el.dataset.t]; if (t) { t[3] = el.value; t[4] = IA.color; el.style.cssText += inkStyle(IA.color); onChange(el.dataset.q); } }
     });
     return () => ro.disconnect();
   };
@@ -146,12 +154,18 @@
       <span class="tiny">Répondre :</span>
       ${[["none", "👆", "Cocher / écrire"], ["x", "✗", "Croix"], ["text", "Aa", "Texte"], ["pen", "✏️", "Crayon"], ["erase", "🧽", "Gomme"]]
         .map(([k, i, l]) => `<button type="button" class="btn sm ${IA.tool === k ? "primary" : ""}" data-tool="${k}" title="${l}">${i}<span class="lbl"> ${l}</span></button>`).join("")}
+      <span class="ia-inks" role="radiogroup" aria-label="Couleur d'encre">${IA.INKS.map(([c, l]) => `<button type="button" class="ia-ink ${IA.color === c ? "on" : ""}" data-ink="${c}" role="radio" aria-checked="${IA.color === c}" title="Encre ${l.toLowerCase()}" aria-label="${l}" style="background:${c}"></button>`).join("")}</span>
     </div>`;
   IA.bindToolbar = (root) => {
     root.querySelectorAll("[data-tool]").forEach((b) => b.addEventListener("click", () => {
       IA.tool = b.dataset.tool;
       root.querySelectorAll("[data-tool]").forEach((x) => x.classList.toggle("primary", x === b));
       root.querySelectorAll(".ia").forEach((l) => l.dataset.tool = IA.tool);
+    }));
+    root.querySelectorAll("[data-ink]").forEach((b) => b.addEventListener("click", () => {
+      IA.color = ink(b.dataset.ink);
+      try { localStorage.setItem("ceb:ink", JSON.stringify(IA.color)); } catch (e) { /* stockage indisponible */ }
+      root.querySelectorAll("[data-ink]").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", x === b); });
     }));
     root.querySelectorAll(".ia").forEach((l) => l.dataset.tool = IA.tool);
   };

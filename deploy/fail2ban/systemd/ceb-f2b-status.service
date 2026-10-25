@@ -1,0 +1,8 @@
+[Unit]
+Description=Révision CEB : relevé fail2ban pour l'onglet Sécurité
+After=fail2ban.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/ceb-f2b
+ExecStart=/usr/local/sbin/ceb-f2b-status

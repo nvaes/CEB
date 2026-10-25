@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Relevé fail2ban pour l'onglet « Sécurité » du site Révision CEB.
+
+Exécuté sur l'hôte Docker (root) par ceb-f2b-status.timer (chaque minute) et ceb-f2b-status.path
+(dès qu'un administrateur demande un déblocage) :
+  1. traite les demandes de déblocage déposées par le site dans <SEC_DIR>/unban.json ;
+  2. écrit l'état des prisons fail2ban dans <SEC_DIR>/fail2ban.json (lu par le site).
+"""
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import time
+
+SEC_DIR = os.environ.get("CEB_SEC_DIR", "/var/lib/docker/volumes/ceb_ceb-data/_data/security")
+F2B_LOG = os.environ.get("F2B_LOG", "/var/log/fail2ban.log")
+STATUS = os.path.join(SEC_DIR, "fail2ban.json")
+UNBAN = os.path.join(SEC_DIR, "unban.json")
+
+
+def f2b(*args):
+    r = subprocess.run(["fail2ban-client", *args], capture_output=True, text=True, timeout=20)
+    return r.returncode, r.stdout.strip()
+
+
+def field(text, name):
+    m = re.search(rf"{re.escape(name)}:\s*(.*)", text)
+    return m.group(1).strip() if m else ""
+
+
+def process_unbans():
+    try:
+        with open(UNBAN) as f:
+            pending = json.load(f)
+    except (OSError, ValueError):
+        return []
+    done = []
+    for p in pending:
+        try:
+            ip = str(ipaddress.ip_address(str(p.get("ip", ""))))
+        except ValueError:
+            continue
+        rc, out = f2b("unban", ip)
+        done.append({"ip": ip, "by": p.get("by"), "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "rc": rc})
+    os.remove(UNBAN)
+    return done
+
+
+def jail_info(name):
+    _, st = f2b("status", name)
+    j = {"name": name,
+         "currently_failed": int(field(st, "Currently failed") or 0),
+         "total_failed": int(field(st, "Total failed") or 0),
+         "currently_banned": int(field(st, "Currently banned") or 0),
+         "total_banned": int(field(st, "Total banned") or 0), "banned": []}
+    for key in ("maxretry", "findtime", "bantime"):
+        rc, out = f2b("get", name, key)
+        j[key] = int(out) if rc == 0 and out.lstrip("-").isdigit() else None
+    rc, out = f2b("get", name, "banip", "--with-time")
+    if rc == 0 and out:
+        # « 192.0.2.10 \t2026-10-25 10:00:00 + 3600 = 2026-10-25 11:00:00 »
+        for line in out.splitlines():
+            m = re.match(r"\s*(\S+)\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s*\+\s*(-?\d+)\s*=\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", line)
+            if m:
+                j["banned"].append({"ip": m[1], "since": m[2], "until": m[4]})
+            elif line.strip():
+                j["banned"].append({"ip": line.split()[0]})
+    else:
+        ips = field(st, "Banned IP list")
+        j["banned"] = [{"ip": ip} for ip in ips.split()] if ips else []
+    return j
+
+
+def recent_events(jails, n=100):
+    try:
+        with open(F2B_LOG, errors="replace") as f:
+            lines = f.readlines()[-5000:]
+    except OSError:
+        return []
+    ev = []
+    rx = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ fail2ban\.\w+\s+\[\d+\]: \w+\s+\[([\w-]+)\] (Ban|Unban|Found|Restore Ban) (\S+)")
+    for line in lines:
+        m = rx.match(line)
+        if m and m[2] in jails:
+            ev.append({"ts": m[1], "jail": m[2], "action": m[3].replace("Restore Ban", "Restore"), "ip": m[4]})
+    return ev[-n:][::-1]
+
+
+def main():
+    os.makedirs(SEC_DIR, exist_ok=True)
+    unbanned = process_unbans()
+    rc, out = f2b("status")
+    running = rc == 0
+    names = [s.strip() for s in field(out, "Jail list").split(",") if s.strip()] if running else []
+    _, ver = f2b("version")
+    data = {"updated": time.strftime("%Y-%m-%d %H:%M:%S"), "running": running, "version": ver if running else None,
+            "jails": [jail_info(n) for n in names], "events": recent_events(set(names)), "unbanned": unbanned}
+    tmp = STATUS + ".part"
+    with open(tmp, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, STATUS)
+
+
+if __name__ == "__main__":
+    main()

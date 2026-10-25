@@ -12,16 +12,17 @@ Les enfants travaillent **question par question** sur les vraies épreuves, comp
 | ✂️ **Découpage automatique** | Chaque question est extraite des questionnaires, associée à sa ligne de correction et aux pages du portfolio qu'elle utilise. Les points par question sont relus et contrôlés avec le total officiel de chaque livret. |
 | 🎯 **S'entraîner** | Séries de questions mélangées par compétence et par année (ex. : toutes les questions de « Grandeurs » de 2021 à 2025), filtres « jamais faites » / « pas encore réussies ». |
 | 🔁 **À revoir** | Les questions ratées reviennent ; une fois réussies, elles réapparaissent à intervalles espacés (2, 5, 12 jours) pour consolider. Possibilité de marquer une question. |
-| ✍️ **Réponses à l'écran** | L'enfant répond directement sur les pages : les cases à cocher et les lignes de réponse sont repérées dans les PDF (cases cliquables, champs de saisie posés sur les lignes) ; pour les tableaux, schémas et tracés, outils ✗ croix, Aa texte, ✏️ crayon et gomme. Réponses sauvegardées par enfant. |
+| ✍️ **Réponses à l'écran** | L'enfant répond directement sur les pages : les cases à cocher et les lignes de réponse sont repérées dans les PDF (cases cliquables, champs de saisie posés sur les lignes) ; pour les tableaux, schémas et tracés, outils ✗ croix, Aa texte, ✏️ crayon et gomme, avec **5 couleurs d'encre** (bleu, rouge, vert, noir, blanc — le blanc sert de correcteur). Réponses sauvegardées par enfant. |
 | 🤖 **Correction automatique des cases** | La clé de chaque question à cases est extraite de la correction officielle (glyphes ☒ du PDF, ou reconnaissance optique + détection des croix rouges) ; les cases sont corrigées et notées automatiquement, le reste de la question est évalué avec la correction. |
 | ⏱️ **Examen blanc** | Un livret complet, réponses à l'écran, durée officielle relevée dans les consignes de passation (brouillon sauvegardé, reprise possible), puis correction : cases notées automatiquement, reste guidé. Tableau « simulation du CEB » (seuil de 50 % par épreuve). |
 | 📤 **Fichiers CEB** | Téléversement des PDF d'une nouvelle année depuis le navigateur, détection automatique des livrets et des sections de correction, réglage fin des plages de pages si nécessaire, analyse incrémentale (les années inchangées sont reprises du cache). |
 | 🎧 **Écouter** | Le texte lu par l'enseignant est extrait de la correction et lu par la synthèse vocale de l'appareil (vitesse réglable, résumés de la dernière question). |
 | ⚡ **Exercices rapides** | Séries générées à l'infini avec correction immédiate : tables, calcul mental, ×/: par 10-100-1 000, fractions et pourcentages, arrondis, décimaux, conversions, durées, périmètres et aires, conjugaison, homophones. 3 niveaux. |
 | 👪 **Familles** | Plusieurs familles peuvent partager le même serveur : chaque famille a **son propre code parent** et **ne voit que ses enfants** (progrès, gestion, codes). Chaque tablette est associée une fois à une famille avec le code parent ; l'écran « Qui révise aujourd'hui ? » n'affiche alors que les enfants de cette famille. Le premier compte créé est l'**administrateur** : il gère les fichiers CEB et les familles, et voit la progression de tous les enfants. |
-| 🔒 **Espace Parents** | Accès par **code parent** (demandé à chaque entrée ; la session se ferme dès qu'on quitte l'espace, avec « Verrouiller » ou après 4 h). Regroupe : **📈 Progrès** de ses enfants (tous pour l'administrateur) (réussite par discipline et compétence, carte d'activité, examens blancs, simulation du CEB, exercices, export CSV), **👨‍👩‍👧 Enfants** (ajout, modification, réinitialisation du code, remise à zéro, suppression), **⚙️ Réglages** (son code parent, association de la tablette) et, pour l'administrateur, **📤 Fichiers CEB** et **👪 Familles** (créer une famille avec son code, renommer, nouveau code, supprimer). |
-| 👨‍👩‍👧 **Multi-enfants** | Un profil par enfant protégé par un **code secret** (4 à 6 chiffres, pavé numérique adapté aux enfants), choisi à la création du profil. L'enfant peut changer son code ; en cas d'oubli, un parent le **réinitialise** (code parent requis) et l'enfant en choisit un nouveau à sa prochaine connexion. 5 erreurs de suite bloquent le profil 30 s, puis plus longtemps. |
-| 🔑 **Codes parents** | Un code par famille, unique sur le serveur (c'est lui qui identifie la famille). Le cloisonnement est appliqué **par le serveur** : une session parent ne peut lire ou modifier que les enfants de sa famille, seul l'administrateur peut téléverser, lancer l'analyse et gérer les familles. Un ancien code parent unique est migré automatiquement en compte administrateur. |
+| 🔒 **Espace Parents** | Accès par **code parent** (demandé à chaque entrée ; la session se ferme dès qu'on quitte l'espace, avec « Verrouiller » ou après 4 h). Regroupe : **📈 Progrès** de ses enfants (tous pour l'administrateur) (réussite par discipline et compétence, carte d'activité, examens blancs, simulation du CEB, exercices, export CSV), **👨‍👩‍👧 Enfants** (ajout, modification, réinitialisation du code, remise à zéro, suppression), **⚙️ Réglages** (son code parent, association de la tablette) et, pour l'administrateur, **📤 Fichiers CEB**, **🛡️ Sécurité** et **👪 Familles** (créer une famille avec son code, renommer, nouveau code, supprimer). |
+| 👨‍👩‍👧 **Multi-enfants** | Un profil par enfant protégé par un **code secret** (6 chiffres, pavé numérique adapté aux enfants), choisi à la création du profil. L'enfant peut changer son code ; en cas d'oubli, un parent le **réinitialise** (code parent requis) et l'enfant en choisit un nouveau à sa prochaine connexion. Un ancien code à 4 ou 5 chiffres est encore accepté une fois, puis l'enfant doit choisir un code à 6 chiffres. 5 erreurs de suite bloquent le profil 30 s, puis plus longtemps. |
+| 🔑 **Codes parents** | Un code par famille, unique sur le serveur (c'est lui qui identifie la famille). Le cloisonnement est appliqué **par le serveur** : une session parent ne peut lire ou modifier que les enfants de sa famille, seul l'administrateur peut téléverser, lancer l'analyse et gérer les familles. Tout nouveau code parent a **6 chiffres** ; un ancien code d'une autre longueur ouvre encore l'espace Parents une fois, puis un code à 6 chiffres est exigé. Un ancien code parent unique est migré automatiquement en compte administrateur. |
+| 🛡️ **Sécurité (fail2ban)** | Chaque tentative de connexion (code parent ou enfant) est notée avec l'adresse IP dans `/data/security/auth.log`. **fail2ban**, installé sur l'hôte Docker, bloque une adresse après 10 échecs en 10 min (1 h, plus long en cas de récidive) ; la prison `sshd` protège aussi SSH. L'onglet administrateur **🛡️ Sécurité** affiche l'état de fail2ban, les adresses bloquées (avec bouton « Débloquer »), l'activité récente et le journal des connexions. |
 | 📱 **Tablette** | Interface responsive, mode sombre, installable sur l'écran d'accueil, impression d'une question. |
 
 Aucune donnée ne quitte votre réseau : pas de compte, pas de service externe.
@@ -105,6 +106,7 @@ pdf/                PDF officiels (non versionnés)
 | DELETE | `/api/uploads/{fichier}` | suppression d'un fichier téléversé |
 | GET/PUT | `/api/yearconfig/{année}` | réglage fin d'une année |
 | POST | `/api/rebuild` | relance de l'analyse (années inchangées reprises du cache) |
+| GET · POST | `/api/security` · `/api/security/unban` | état fail2ban et journal des connexions · demande de déblocage d'une IP (administrateur) |
 
 ### Développement sans Docker
 
@@ -124,6 +126,23 @@ CEB_PDF_DIR=./pdf CEB_DATA_DIR=./data PORT=8080 python3 app/server.py
 ## Sécurité
 
 Le site est prévu pour un réseau domestique (HTTP, sans compte). Les codes enfants et le code parent sont stockés hachés (PBKDF2 / SHA-256) ; 5 erreurs de suite bloquent temporairement la saisie (enfant ou parent) ; la session parent n'est gardée qu'en mémoire du navigateur (verrouillée au rechargement de la page) ; les codes enfants servent à séparer les profils entre frères et sœurs, pas à protéger le site contre un attaquant du réseau. Pour un accès depuis l'extérieur, placer le site derrière un reverse proxy avec HTTPS et authentification (ou un VPN). Les profils créés avant l'ajout des codes demandent à l'enfant de créer son code à la première connexion.
+
+### fail2ban (hôte Docker)
+
+```sh
+# sur l'hôte Docker, en root, depuis la racine du dépôt, conteneur démarré
+sh deploy/fail2ban/install.sh
+# ne jamais bloquer le réseau de la maison :
+EXTRA_IGNORE="192.168.1.0/24" sh deploy/fail2ban/install.sh
+```
+
+Le script installe fail2ban, le filtre `ceb-auth`, les prisons `ceb-auth` et `sshd` (`/etc/fail2ban/jail.d/ceb.local`), la rotation du journal, et le service `ceb-f2b-status` (minuterie chaque minute + déclenchement immédiat sur demande de déblocage) qui écrit `security/fail2ban.json` dans le volume `/data` pour l'onglet Sécurité. Le port publié par Docker est filtré dans la chaîne `DOCKER-USER` (et `INPUT`). Derrière un reverse proxy, définir `CEB_TRUST_PROXY=1` pour utiliser l'IP de `X-Forwarded-For` — sinon c'est l'IP du proxy qui serait bloquée.
+
+Attention : les tablettes d'une même maison partagent souvent la même IP publique ; un enfant qui se trompe beaucoup peut faire bloquer toute la maison. Ajouter ce réseau à `EXTRA_IGNORE`, ou débloquer depuis l'onglet Sécurité (ou `fail2ban-client unban <ip>`).
+
+## Guide pour les parents
+
+Voir [GUIDE-PARENTS.md](GUIDE-PARENTS.md), à partager avec les familles.
 
 ## Droits
 
