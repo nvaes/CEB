@@ -472,6 +472,28 @@ class Handler(BaseHTTPRequestHandler):
     def auth(self, ok, kind, who=""):
         auth_event(ok, self.client_ip(), kind, who)
 
+    def pin_taken(self, pin, own_id=None):
+        """Code parent déjà pris par une autre famille ? Renvoie (statut, message) à refuser, ou None.
+
+        Le code seul identifie la famille à la connexion : répondre « déjà utilisé » permettrait à un parent
+        de deviner le code d'une autre famille. Pour un parent (non administrateur), chaque refus compte donc
+        comme un échec de connexion (blocage temporaire, journal lu par fail2ban) et le message reste neutre."""
+        p = self.parent()
+        trusted = bool(p) and p["role"] == "admin"
+        key = ("taken", p["id"] if p else 0)
+        n, until = _fails.get(key, (0, 0))
+        if not trusted and until > time.time():
+            self.auth(False, "parent-taken-blocked", p["name"] if p else "")
+            return 429, f"trop d'essais : réessaie dans {int(until - time.time()) + 1} s"
+        other = find_parent_by_pin(pin)
+        if not other or other["id"] == own_id:
+            return None
+        if not trusted:
+            n += 1
+            _fails[key] = (n, time.time() + 30 * (n - 4)) if n >= 5 else (n, 0)
+            self.auth(False, "parent-taken", p["name"] if p else "")
+        return 409, "ce code n'est pas disponible, choisis-en un autre"
+
     def parent(self):
         """Compte parent de la session (jeton X-Parent-Token ou ?ptoken=), ou None."""
         if not hasattr(self, "_parent"):
@@ -702,8 +724,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self.error(400, "nom de la famille requis")
                     if not PIN_RE.fullmatch(np_):
                         return self.error(400, CODE_MSG)
-                    if find_parent_by_pin(np_):
-                        return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
+                    if taken := self.pin_taken(np_):
+                        return self.error(*taken)
                     nid = execute("INSERT INTO parents(name,pin,role,created) VALUES(?,?,?,?)",
                                   (name, code_hash(np_), "parent", time.time()))
                     return self.send_json(parent_info(nid), 201)
@@ -719,9 +741,8 @@ class Handler(BaseHTTPRequestHandler):
                     np_ = str(data["pin"])
                     if not PIN_RE.fullmatch(np_):
                         return self.error(400, CODE_MSG)
-                    other = find_parent_by_pin(np_)
-                    if other and other["id"] != tid:
-                        return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
+                    if taken := self.pin_taken(np_, tid):
+                        return self.error(*taken)
                     execute("UPDATE parents SET pin=? WHERE id=?", (code_hash(np_), tid))
                     execute("DELETE FROM tokens WHERE profile=0 AND parent=? AND token<>?",
                             (tid, self.headers.get("X-Parent-Token", "")))
@@ -787,9 +808,8 @@ class Handler(BaseHTTPRequestHandler):
                     np_ = str(data["new_pin"])
                     if not PIN_RE.fullmatch(np_):
                         return self.error(400, CODE_MSG)
-                    other = find_parent_by_pin(np_)
-                    if other and other["id"] != p["id"]:
-                        return self.error(409, "ce code est déjà utilisé par une autre famille, choisis-en un autre")
+                    if taken := self.pin_taken(np_, p["id"]):
+                        return self.error(*taken)
                     execute("UPDATE parents SET pin=? WHERE id=?", (code_hash(np_), p["id"]))
                 if "prefs" in data and p["role"] == "admin":
                     set_setting("prefs", json.dumps(data["prefs"]))

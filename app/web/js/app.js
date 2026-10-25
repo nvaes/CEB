@@ -1159,7 +1159,7 @@
       <p class="tiny" style="margin:0">Donne ensuite son code au parent concerné : il associe ses tablettes à sa famille (écran d'accueil → « Associer à ma famille ») et ajoute ses enfants depuis son espace Parents.</p></div>`), true);
     bindShell();
     const newPin = async (title) => {
-      const a = await askCode({ title, subtitle: "Code parent : 6 chiffres, différent de celui des autres familles", avatar: "👪", exact: CODE_LEN }); if (a === null) return null;
+      const a = await askCode({ title, subtitle: "Code parent : 6 chiffres, propre à cette famille", avatar: "👪", exact: CODE_LEN }); if (a === null) return null;
       const b = await askCode({ title: "Confirme le code", subtitle: "Tape-le une deuxième fois", avatar: "👪", exact: CODE_LEN }); if (b === null) return null;
       if (a !== b) { toast("Les deux codes sont différents"); return null; }
       return a;
@@ -1184,7 +1184,7 @@
     }));
   }
   /* --- sécurité : état de fail2ban (écrit par l'hôte) et journal des connexions */
-  const AUTH_KIND = { parent: "Code parent", "parent-pin": "Code parent", "parent-blocked": "Parent (bloqué)", child: "Code enfant", "child-blocked": "Enfant (bloqué)", "child-oldcode": "Ancien code enfant" };
+  const AUTH_KIND = { parent: "Code parent", "parent-pin": "Code parent", "parent-blocked": "Parent (bloqué)", child: "Code enfant", "child-blocked": "Enfant (bloqué)", "child-oldcode": "Ancien code enfant", "parent-taken": "Code déjà pris (changement)", "parent-taken-blocked": "Changement de code (bloqué)" };
   async function viewParentSecurity() {
     const r = await api("security");
     const f = r.fail2ban; const stale = !f || r.age === null || r.age > 180;
